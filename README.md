@@ -170,34 +170,76 @@ pytest -v
 
 ## Deploying to `ollive.hardeep.cv`
 
-The whole stack runs from `docker compose`, so deployment is:
+Live deployment is on a Hetzner box behind host nginx + Let's Encrypt, with
+Cloudflare for DNS. This is the recipe that produced
+**https://ollive.hardeep.cv**.
 
-1. **Server**: Provision a Hetzner CPX21 (or larger) with Docker installed.
-2. **DNS / TLS**: Point `ollive.hardeep.cv` at the server's IP in Cloudflare.
-   Enable **Proxy (orange cloud)** and set SSL/TLS mode to **Full**.
-3. **Files**: `git clone` this repo on the server.
-4. **Env**: `cp .env.example .env`, fill in `ANTHROPIC_API_KEY` and a strong
-   `POSTGRES_PASSWORD`. Set:
-   - `ALLOWED_ORIGINS=https://ollive.hardeep.cv`
-   - `NEXT_PUBLIC_API_BASE_URL=https://ollive.hardeep.cv` (assumes you put the
-     API under the same hostname behind a reverse proxy — see below)
-5. **Reverse proxy** (Caddy is the simplest):
+1. **Server** with Docker + nginx + Certbot already installed (any small
+   Hetzner box). The compose stack binds backend/frontend/postgres to
+   loopback only — nginx terminates TLS and proxies inward.
 
-   ```Caddyfile
-   ollive.hardeep.cv {
-       reverse_proxy /api/* backend:8000
-       reverse_proxy /health backend:8000
-       reverse_proxy /chat   backend:8000
-       reverse_proxy /stats  backend:8000
-       reverse_proxy /sessions* backend:8000
-       reverse_proxy * frontend:3000
-   }
+2. **Sync the code** to the server, e.g.:
+   ```bash
+   rsync -azh --delete --exclude .git --exclude node_modules --exclude .env \
+     ./ root@SERVER_IP:/root/ollive/
    ```
 
-   Add Caddy as a fourth service to `docker-compose.yml` if you don't already
-   run it on the host. (Cloudflare handles the public TLS; Caddy + the Docker
-   network handle the internal routing.)
-6. `docker compose up -d --build`
+3. **Write `/root/ollive/.env`** with prod values (loopback binds + free ports):
+   ```env
+   LLM_PROVIDER=deepseek
+   DEEPSEEK_API_KEY=sk-...
+   POSTGRES_USER=ollive
+   POSTGRES_PASSWORD=<strong-password>
+   POSTGRES_DB=ollive
+   BACKEND_BIND_HOST=127.0.0.1
+   BACKEND_PORT=8001
+   FRONTEND_BIND_HOST=127.0.0.1
+   FRONTEND_PORT=3010
+   POSTGRES_BIND_HOST=127.0.0.1
+   POSTGRES_PORT=5433
+   ALLOWED_ORIGINS=https://ollive.hardeep.cv
+   NEXT_PUBLIC_API_BASE_URL=https://ollive.hardeep.cv
+   ```
+
+4. **Bring up the stack** (use a project name to keep container names clean if
+   the box runs other compose stacks):
+   ```bash
+   docker compose -p ollive --env-file .env up -d --build
+   ```
+
+5. **DNS at Cloudflare**: add an `A` record `ollive` → `SERVER_IP`. Set
+   **DNS only (grey cloud)** initially so Certbot's HTTP-01 challenge can
+   reach the origin.
+
+6. **nginx site** at `/etc/nginx/sites-available/ollive` (ships in this repo
+   as a template — see [docs/nginx/ollive](docs/nginx/ollive)):
+   ```nginx
+   server {
+       listen 80;
+       server_name ollive.hardeep.cv;
+       location = /health     { proxy_pass http://127.0.0.1:8001; include /etc/nginx/snippets/ollive-proxy.conf; }
+       location = /chat       { proxy_pass http://127.0.0.1:8001; include /etc/nginx/snippets/ollive-proxy.conf; }
+       location = /stats      { proxy_pass http://127.0.0.1:8001; include /etc/nginx/snippets/ollive-proxy.conf; }
+       location = /sessions   { proxy_pass http://127.0.0.1:8001; include /etc/nginx/snippets/ollive-proxy.conf; }
+       location ^~ /sessions/ { proxy_pass http://127.0.0.1:8001; include /etc/nginx/snippets/ollive-proxy.conf; }
+       location /             { proxy_pass http://127.0.0.1:3010; include /etc/nginx/snippets/ollive-proxy.conf; }
+   }
+   ```
+   Symlink it into `sites-enabled/`, `nginx -t && systemctl reload nginx`.
+
+7. **Issue TLS**:
+   ```bash
+   certbot --nginx -d ollive.hardeep.cv --non-interactive --agree-tos \
+     -m you@example.com --redirect
+   ```
+   Certbot rewrites the nginx site to listen on 443 with the new cert and
+   adds an HTTP→HTTPS redirect.
+
+8. **Flip Cloudflare to proxied**: in DNS, edit the record → Proxy status
+   → **Proxied (orange cloud)**. Then **SSL/TLS → Overview → Full (strict)**
+   (origin has a valid LE cert now).
+
+To re-deploy a code change: rsync + `docker compose -p ollive up -d --build`.
 
 ---
 

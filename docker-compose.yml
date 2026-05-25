@@ -14,8 +14,10 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    # Bind only to localhost by default; override POSTGRES_PORT to expose
+    # publicly if you really need to (you almost never do).
     ports:
-      - "5432:5432"
+      - "${POSTGRES_BIND_HOST:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
 
   backend:
     build:
@@ -47,7 +49,7 @@ services:
       postgres:
         condition: service_healthy
     ports:
-      - "8000:8000"
+      - "${BACKEND_BIND_HOST:-0.0.0.0}:${BACKEND_PORT:-8000}:8000"
 
   frontend:
     build:
@@ -58,7 +60,7 @@ services:
     depends_on:
       - backend
     ports:
-      - "${FRONTEND_PORT:-3000}:3000"
+      - "${FRONTEND_BIND_HOST:-0.0.0.0}:${FRONTEND_PORT:-3000}:3000"
 
 volumes:
   postgres-data:
