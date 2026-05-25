@@ -1,4 +1,4 @@
-"""Chat orchestration: load history, call Claude, persist message + inference log."""
+"""Chat orchestration: load history, call the LLM, persist message + inference log."""
 
 from __future__ import annotations
 
@@ -10,8 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db.models import Message, Session, utcnow
-from app.services.claude_client import get_claude_client
 from app.services.inference_logger import InferencePayload, write_inference_log
+from app.services.llm_client import get_llm_client
 from app.services.pricing import estimate_cost
 
 logger = logging.getLogger(__name__)
@@ -55,8 +55,8 @@ async def handle_chat(
     Behavior:
       - Loads or creates the session.
       - Persists the user message.
-      - Calls Claude with the recent history.
-      - Persists the assistant message (only if Claude returned text).
+      - Calls the configured LLM with the recent history.
+      - Persists the assistant message (only if the LLM returned text).
       - Writes an inference log row regardless of success/failure.
     """
     settings = get_settings()
@@ -70,8 +70,8 @@ async def handle_chat(
     history = await _load_history(db, sid, settings.max_history_messages)
     messages = [{"role": m.role, "content": m.content} for m in history]
 
-    claude = get_claude_client()
-    result = await claude.chat(messages=messages, system=SYSTEM_PROMPT)
+    llm = get_llm_client()
+    result = await llm.chat(messages=messages, system=SYSTEM_PROMPT, max_tokens=1024)
 
     if result.status == "ok" and result.text:
         db.add(Message(session_id=sid, role="assistant", content=result.text))
@@ -83,7 +83,7 @@ async def handle_chat(
     cost = estimate_cost(result.prompt_tokens, result.completion_tokens)
     payload = InferencePayload(
         session_id=sid,
-        provider="anthropic",
+        provider=result.provider,
         model_name=result.model,
         prompt_tokens=result.prompt_tokens,
         completion_tokens=result.completion_tokens,

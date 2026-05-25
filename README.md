@@ -7,7 +7,8 @@ observability dashboard.
 - **Backend**: FastAPI, Python 3.11, SQLAlchemy 2 (async), asyncpg
 - **Database**: PostgreSQL 16
 - **Frontend**: Next.js 14 (App Router, TypeScript)
-- **LLM**: Claude Sonnet 4 (`claude-sonnet-4-20250514`) via the Anthropic SDK
+- **LLM**: pluggable — Anthropic (Claude), DeepSeek, or any OpenAI-compatible
+  provider. Switch with `LLM_PROVIDER=anthropic|deepseek|openai`.
 - **Container**: one-command `docker compose up`
 
 ---
@@ -16,7 +17,10 @@ observability dashboard.
 
 ```bash
 cp .env.example .env
-# Edit .env and set ANTHROPIC_API_KEY=sk-ant-...
+# Pick ONE provider and set its key:
+#   LLM_PROVIDER=deepseek   DEEPSEEK_API_KEY=sk-...
+#   LLM_PROVIDER=anthropic  ANTHROPIC_API_KEY=sk-ant-...
+#   LLM_PROVIDER=openai     OPENAI_API_KEY=sk-...
 
 docker compose up --build
 ```
@@ -28,6 +32,8 @@ Then open:
 - API stats:      http://localhost:8000/stats
 
 The Postgres tables are created automatically on backend startup.
+
+If port 3000 is taken on your host, set `FRONTEND_PORT=3001` in `.env`.
 
 ---
 
@@ -131,15 +137,20 @@ All config is via environment variables (see `.env.example`):
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `ANTHROPIC_API_KEY` | _required_ | |
-| `CLAUDE_MODEL` | `claude-sonnet-4-20250514` | |
+| `LLM_PROVIDER` | `anthropic` | `anthropic` \| `deepseek` \| `openai` |
+| `ANTHROPIC_API_KEY` / `ANTHROPIC_MODEL` | / `claude-sonnet-4-20250514` | when provider=anthropic |
+| `DEEPSEEK_API_KEY` / `DEEPSEEK_MODEL` | / `deepseek-chat` | when provider=deepseek |
+| `OPENAI_API_KEY` / `OPENAI_MODEL` | / `gpt-4o-mini` | when provider=openai |
+| `OPENAI_BASE_URL` | — | optional override (e.g. any OpenAI-compatible host) |
 | `DATABASE_URL` | `postgresql+asyncpg://...` | async URL |
 | `AGGREGATION_INTERVAL_SECONDS` | `60` | worker tick |
 | `ALLOWED_ORIGINS` | `http://localhost:3000` | comma-separated |
 | `NEXT_PUBLIC_API_BASE_URL` | `http://localhost:8000` | baked into frontend at build time |
+| `FRONTEND_PORT` | `3000` | host port for the frontend container |
 
-Pricing for the cost estimator defaults to Sonnet 4 ($3 / $15 per MTok).
-Override with `PRICE_PER_MILLION_INPUT_TOKENS` / `..._OUTPUT_TOKENS`.
+Pricing for the cost estimator has built-in defaults per provider (Sonnet 4
+$3/$15, DeepSeek $0.27/$1.10, gpt-4o-mini $0.15/$0.60 per MTok). Override with
+`PRICE_PER_MILLION_INPUT_TOKENS` / `..._OUTPUT_TOKENS`.
 
 ---
 
