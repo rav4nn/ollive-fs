@@ -30,8 +30,19 @@ class Settings(BaseSettings):
     # ------ Storage ------
     database_url: str = "postgresql+asyncpg://ollive:ollive@localhost:5432/ollive"
 
-    # ------ Ingestion worker ------
+    # ------ Ingestion pipeline ------
     aggregation_interval_seconds: int = 60
+
+    # Redis is used as an event bus between the chat handler and the
+    # ingestion worker. If REDIS_URL is empty the system falls back to the
+    # synchronous "write inference_logs directly" path — useful for local
+    # dev without docker-compose.
+    redis_url: str = ""
+    redis_stream_key: str = "inference_logs"
+    redis_consumer_group: str = "ingestor"
+    redis_consumer_name: str = "worker-1"
+    redis_block_ms: int = 5000
+    redis_batch_size: int = 200
 
     # ------ CORS ------
     allowed_origins: str = "http://localhost:3000"
@@ -43,6 +54,12 @@ class Settings(BaseSettings):
 
     # ------ Conversation ------
     max_history_messages: int = 20
+
+    # ------ Privacy ------
+    # When true, redact PII (emails / phones / credit cards / SSNs / IPv4)
+    # from input_text/output_text BEFORE we write the inference_logs row.
+    # The originals still go to the LLM untouched.
+    redact_pii: bool = False
 
     @property
     def allowed_origins_list(self) -> list[str]:

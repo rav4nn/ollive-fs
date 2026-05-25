@@ -8,10 +8,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.routes import router as api_router
 from app.config import get_settings
 from app.db.init_db import init_db
+from app.services.event_bus import close as close_event_bus
 from app.workers.ingestion import run_worker
+from app.workers.log_consumer import run_consumer
+
+import os
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=os.environ.get("LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 logger = logging.getLogger("app")
@@ -21,16 +25,22 @@ logger = logging.getLogger("app")
 async def lifespan(app: FastAPI):
     await init_db()
     stop_event = asyncio.Event()
-    worker_task = asyncio.create_task(run_worker(stop_event), name="ingestion-worker")
+    tasks = [
+        asyncio.create_task(run_worker(stop_event), name="aggregation-worker"),
+        asyncio.create_task(run_consumer(stop_event), name="log-consumer"),
+    ]
     try:
         yield
     finally:
         stop_event.set()
-        worker_task.cancel()
-        try:
-            await worker_task
-        except (asyncio.CancelledError, Exception):
-            pass
+        for t in tasks:
+            t.cancel()
+        for t in tasks:
+            try:
+                await t
+            except (asyncio.CancelledError, Exception):
+                pass
+        await close_event_bus()
 
 
 def create_app() -> FastAPI:

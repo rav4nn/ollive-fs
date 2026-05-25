@@ -13,6 +13,7 @@ from app.config import get_settings
 from app.db.models import Message, Session, utcnow
 from app.services.inference_logger import InferencePayload, write_inference_log
 from app.services.llm_client import LLMResult, get_llm_client
+from app.services.pii import maybe_redact
 from app.services.pricing import estimate_cost
 
 logger = logging.getLogger(__name__)
@@ -90,8 +91,8 @@ async def handle_chat(
         completion_tokens=result.completion_tokens,
         total_tokens=result.total_tokens,
         latency_ms=result.latency_ms,
-        input_text=user_message,
-        output_text=result.text,
+        input_text=maybe_redact(user_message),
+        output_text=maybe_redact(result.text),
         cost_estimate=cost,
         status=result.status,
         error_message=result.error_message,
@@ -166,8 +167,8 @@ async def handle_chat_stream(
         completion_tokens=final.completion_tokens,
         total_tokens=final.total_tokens,
         latency_ms=final.latency_ms,
-        input_text=user_message,
-        output_text=final.text,
+        input_text=maybe_redact(user_message),
+        output_text=maybe_redact(final.text),
         cost_estimate=cost,
         status=final.status,
         error_message=final.error_message,

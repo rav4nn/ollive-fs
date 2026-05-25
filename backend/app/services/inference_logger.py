@@ -1,8 +1,15 @@
 """Inference log writer.
 
-Guarantee: a log entry is never silently dropped. If the DB write fails the
-payload is emitted to stderr as a single JSON line, so an operator can replay
-it from logs.
+Three-tier durability:
+  1. Try Redis Streams (when REDIS_URL is set) — fast publish, consumer
+     persists asynchronously.
+  2. Fall back to a direct Postgres write if Redis is unavailable or returned
+     False.
+  3. If the DB write also fails, emit a single JSON line on stderr so an
+     operator can replay it from container logs.
+
+The guarantee is "never silently dropped" — at least one of these three
+levels will always run, and each one logs on failure.
 """
 
 from __future__ import annotations
@@ -43,7 +50,15 @@ class InferencePayload:
 
 
 async def write_inference_log(db: AsyncSession, payload: InferencePayload) -> None:
-    """Persist an inference log row. On DB failure, emit JSON to stderr instead."""
+    """Persist an inference log. Prefers Redis stream when configured."""
+    # Local import to keep event_bus a soft dep at module-load time
+    # (in case redis isn't installed in some weird local env).
+    from app.services.event_bus import publish
+
+    if await publish(payload):
+        return  # consumer will land it in Postgres
+
+    # Redis path unavailable — write straight to DB.
     try:
         row = InferenceLog(
             session_id=payload.session_id,
@@ -63,7 +78,7 @@ async def write_inference_log(db: AsyncSession, payload: InferencePayload) -> No
         db.add(row)
         await db.commit()
     except Exception as exc:
-        # Fallback path: structured stderr line so it can be replayed from container logs.
+        # Last-resort fallback: structured stderr line so it can be replayed.
         logger.error("INFERENCE_LOG_FALLBACK %s | error=%s", payload.to_json(), exc)
         try:
             await db.rollback()
