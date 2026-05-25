@@ -8,6 +8,8 @@ from pydantic import BaseModel, Field
 class ChatRequest(BaseModel):
     session_id: str | None = Field(default=None, max_length=64)
     message: str = Field(min_length=1, max_length=20_000)
+    # Override the server-default LLM_PROVIDER for this single request.
+    provider: str | None = Field(default=None, max_length=32)
 
 
 class ChatResponse(BaseModel):
@@ -63,6 +65,18 @@ class StatsResponse(BaseModel):
 class HealthResponse(BaseModel):
     status: str
     db: str
+
+
+class ProviderInfo(BaseModel):
+    name: str
+    available: bool
+    model: str
+    is_default: bool
+
+
+class ProvidersResponse(BaseModel):
+    default: str
+    providers: list[ProviderInfo]
 
 
 class BucketPoint(BaseModel):

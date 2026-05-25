@@ -25,6 +25,7 @@ server {
     location = /health     { proxy_pass http://127.0.0.1:30001; include /etc/nginx/snippets/ollive-proxy.conf; }
     location = /stats      { proxy_pass http://127.0.0.1:30001; include /etc/nginx/snippets/ollive-proxy.conf; }
     location ^~ /stats/    { proxy_pass http://127.0.0.1:30001; include /etc/nginx/snippets/ollive-proxy.conf; }
+    location = /providers  { proxy_pass http://127.0.0.1:30001; include /etc/nginx/snippets/ollive-proxy.conf; }
     location = /sessions   { proxy_pass http://127.0.0.1:30001; include /etc/nginx/snippets/ollive-proxy.conf; }
     location ^~ /sessions/ { proxy_pass http://127.0.0.1:30001; include /etc/nginx/snippets/ollive-proxy.conf; }
 

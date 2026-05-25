@@ -12,11 +12,14 @@ from app.api.schemas import (
     HealthResponse,
     MessageOut,
     OverallStats,
+    ProviderInfo,
+    ProvidersResponse,
     SessionStats,
     SessionSummary,
     StatsResponse,
     TimeseriesResponse,
 )
+from app.config import get_settings
 from app.db.models import InferenceBucket, InferenceStats, Session
 from app.db.session import SessionLocal, get_db
 from app.services.chat_service import (
@@ -25,7 +28,7 @@ from app.services.chat_service import (
     handle_chat_stream,
     list_sessions,
 )
-from app.services.llm_client import LLMResult
+from app.services.llm_client import LLMResult, available_providers
 
 router = APIRouter()
 
@@ -40,9 +43,22 @@ async def health(db: AsyncSession = Depends(get_db)) -> HealthResponse:
     return HealthResponse(status="ok", db=db_status)
 
 
+@router.get("/providers", response_model=ProvidersResponse)
+async def providers() -> ProvidersResponse:
+    info = available_providers()
+    default = get_settings().llm_provider.lower()
+    return ProvidersResponse(
+        default=default,
+        providers=[
+            ProviderInfo(name=n, available=v["available"], model=v["model"], is_default=(n == default))
+            for n, v in info.items()
+        ],
+    )
+
+
 @router.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest, db: AsyncSession = Depends(get_db)) -> ChatResponse:
-    text_out, sid = await handle_chat(db, req.session_id, req.message)
+    text_out, sid = await handle_chat(db, req.session_id, req.message, req.provider)
     return ChatResponse(session_id=sid, response=text_out)
 
 
@@ -67,7 +83,9 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
         # when the handler returns, before we've finished streaming).
         async with SessionLocal() as db:
             try:
-                async for kind, value in handle_chat_stream(db, req.session_id, req.message):
+                async for kind, value in handle_chat_stream(
+                    db, req.session_id, req.message, req.provider
+                ):
                     if kind == "session":
                         yield _sse("session", {"session_id": value})
                     elif kind == "delta":

@@ -8,6 +8,7 @@ import {
   sendChatStream,
   SessionSummary,
 } from "@/lib/api";
+import ProviderSelect from "./ProviderSelect";
 
 const SESSION_KEY = "ollive.session_id";
 
@@ -23,6 +24,7 @@ export default function Chat() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [pending, setPending] = useState(false);
+  const [provider, setProvider] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
@@ -110,7 +112,7 @@ export default function Chat() {
       };
 
       try {
-        for await (const evt of sendChatStream(text, sessionId, ctrl.signal)) {
+        for await (const evt of sendChatStream(text, sessionId, provider, ctrl.signal)) {
           if (evt.type === "session") {
             if (!sessionId) setSessionId(evt.session_id);
           } else if (evt.type === "delta") {
@@ -142,7 +144,7 @@ export default function Chat() {
         abortRef.current = null;
       }
     },
-    [input, pending, sessionId, refreshSessions],
+    [input, pending, sessionId, provider, refreshSessions],
   );
 
   const cancel = useCallback(() => {
@@ -211,6 +213,7 @@ export default function Chat() {
         </div>
 
         <form className="composer" onSubmit={onSubmit}>
+          <ProviderSelect value={provider} onChange={setProvider} />
           <textarea
             value={input}
             onChange={(e) => setInput(e.target.value)}

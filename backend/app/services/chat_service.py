@@ -50,7 +50,10 @@ async def _load_history(db: AsyncSession, session_id: str, limit: int) -> list[M
 
 
 async def handle_chat(
-    db: AsyncSession, session_id: str | None, user_message: str
+    db: AsyncSession,
+    session_id: str | None,
+    user_message: str,
+    provider: str | None = None,
 ) -> tuple[str, str]:
     """Process a chat turn. Returns (assistant_text, session_id).
 
@@ -72,7 +75,7 @@ async def handle_chat(
     history = await _load_history(db, sid, settings.max_history_messages)
     messages = [{"role": m.role, "content": m.content} for m in history]
 
-    llm = get_llm_client()
+    llm = get_llm_client(provider)
     result = await llm.chat(messages=messages, system=SYSTEM_PROMPT, max_tokens=1024)
 
     if result.status == "ok" and result.text:
@@ -82,7 +85,7 @@ async def handle_chat(
     await db.commit()
 
     # Log the inference. This uses its own commit/rollback; failures fall back to stderr.
-    cost = estimate_cost(result.prompt_tokens, result.completion_tokens)
+    cost = estimate_cost(result.prompt_tokens, result.completion_tokens, result.provider)
     payload = InferencePayload(
         session_id=sid,
         provider=result.provider,
@@ -108,7 +111,10 @@ async def handle_chat(
 
 
 async def handle_chat_stream(
-    db: AsyncSession, session_id: str | None, user_message: str
+    db: AsyncSession,
+    session_id: str | None,
+    user_message: str,
+    provider: str | None = None,
 ) -> AsyncIterator[tuple[str, str | LLMResult]]:
     """Streaming variant of handle_chat.
 
@@ -130,7 +136,7 @@ async def handle_chat_stream(
 
     yield ("session", sid)
 
-    llm = get_llm_client()
+    llm = get_llm_client(provider)
     final: LLMResult | None = None
     async for item in llm.chat_stream(messages=messages, system=SYSTEM_PROMPT, max_tokens=1024):
         if isinstance(item, str):
@@ -158,7 +164,7 @@ async def handle_chat_stream(
     session_row.last_active_at = utcnow()
     await db.commit()
 
-    cost = estimate_cost(final.prompt_tokens, final.completion_tokens)
+    cost = estimate_cost(final.prompt_tokens, final.completion_tokens, final.provider)
     payload = InferencePayload(
         session_id=sid,
         provider=final.provider,

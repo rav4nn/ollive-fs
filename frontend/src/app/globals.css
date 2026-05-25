@@ -204,6 +204,25 @@ input, textarea {
 .composer button:disabled { opacity: 0.5; cursor: not-allowed; }
 .composer button.cancel { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); }
 
+.provider-select {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0 28px 0 10px;
+  height: 36px;
+  align-self: center;
+  font-size: 13px;
+  cursor: pointer;
+  appearance: none;
+  background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%),
+                    linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position: calc(100% - 14px) 50%, calc(100% - 9px) 50%;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+}
+.provider-select:hover { border-color: var(--accent); }
+
 /* dashboard */
 .dash-grid {
   display: grid;

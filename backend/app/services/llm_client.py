@@ -1,11 +1,13 @@
 """Unified LLM client. Wraps Anthropic and any OpenAI-compatible provider
-(DeepSeek, OpenAI itself, etc.) behind one interface and captures inference
+(DeepSeek, OpenAI itself, Gemini) behind one interface and captures inference
 metadata for the logger.
 
 Each provider exposes two entry points:
   - chat()         -> waits for the full response, returns LLMResult
   - chat_stream()  -> async-yields text chunks, then yields a final
                       LLMResult with token + latency metadata
+
+A registry caches one client per provider so per-request switching is cheap.
 """
 
 from __future__ import annotations
@@ -43,8 +45,6 @@ class LLMResult:
     error_message: str | None = None
 
 
-# A streaming call yields zero or more text chunks (str) and then one
-# terminal LLMResult that includes the full text and usage metadata.
 StreamItem = Union[str, LLMResult]
 
 
@@ -71,10 +71,9 @@ class _BaseClient:
 class _AnthropicClient(_BaseClient):
     provider = "anthropic"
 
-    def __init__(self) -> None:
-        s = get_settings()
-        self.model = s.anthropic_model
-        self._client = AsyncAnthropic(api_key=s.anthropic_api_key)
+    def __init__(self, api_key: str, model: str) -> None:
+        self.model = model
+        self._client = AsyncAnthropic(api_key=api_key)
 
     def _kwargs(self, messages, system, max_tokens) -> dict:
         kwargs: dict = {
@@ -134,19 +133,15 @@ class _AnthropicClient(_BaseClient):
 
 
 # ----------------------------------------------------------------------------
-# OpenAI-compatible (OpenAI, DeepSeek, ...)
+# OpenAI-compatible (OpenAI, DeepSeek, Gemini, ...)
 # ----------------------------------------------------------------------------
 
 
 class _OpenAICompatibleClient(_BaseClient):
-    def __init__(self) -> None:
-        s = get_settings()
-        self.provider = s.llm_provider.lower()
-        self.model = s.resolved_model()
-        self._client = AsyncOpenAI(
-            api_key=s.resolved_api_key(),
-            base_url=s.resolved_base_url(),
-        )
+    def __init__(self, provider: str, api_key: str, model: str, base_url: str | None) -> None:
+        self.provider = provider
+        self.model = model
+        self._client = AsyncOpenAI(api_key=api_key, base_url=base_url)
 
     @staticmethod
     def _prepare(messages, system):
@@ -187,8 +182,6 @@ class _OpenAICompatibleClient(_BaseClient):
         chunks: list[str] = []
         prompt_tokens = completion_tokens = total_tokens = 0
         try:
-            # stream_options.include_usage tells the API to emit a final usage
-            # frame after the last content chunk. OpenAI + DeepSeek both honor it.
             stream = await self._client.chat.completions.create(
                 model=self.model,
                 messages=msgs,
@@ -197,7 +190,6 @@ class _OpenAICompatibleClient(_BaseClient):
                 stream_options={"include_usage": True},
             )
             async for chunk in stream:
-                # Usage frames may have no choices, or choices with empty deltas.
                 if chunk.choices:
                     delta = chunk.choices[0].delta
                     content = getattr(delta, "content", None)
@@ -245,17 +237,73 @@ def _error_result(provider: str, model: str, started: float, exc: BaseException)
     )
 
 
-_singleton: _BaseClient | None = None
+# ----------------------------------------------------------------------------
+# Registry
+# ----------------------------------------------------------------------------
+
+SUPPORTED_PROVIDERS = ("anthropic", "deepseek", "openai", "gemini")
+
+_cache: dict[str, _BaseClient] = {}
 
 
-def get_llm_client() -> _BaseClient:
-    global _singleton
-    if _singleton is None:
-        provider = get_settings().llm_provider.lower()
-        if provider == "anthropic":
-            _singleton = _AnthropicClient()
-        elif provider in ("openai", "deepseek", "gemini"):
-            _singleton = _OpenAICompatibleClient()
-        else:
-            raise ValueError(f"unknown LLM_PROVIDER: {provider}")
-    return _singleton
+def _build_client(provider: str) -> _BaseClient:
+    """Build a client for one provider from settings. Raises if no key is set."""
+    s = get_settings()
+    p = provider.lower()
+    if p == "anthropic":
+        if not s.anthropic_api_key:
+            raise ValueError("anthropic not configured: ANTHROPIC_API_KEY is empty")
+        return _AnthropicClient(api_key=s.anthropic_api_key, model=s.anthropic_model)
+    if p == "deepseek":
+        key = s.deepseek_api_key or s.openai_api_key
+        if not key:
+            raise ValueError("deepseek not configured: DEEPSEEK_API_KEY is empty")
+        return _OpenAICompatibleClient(
+            provider="deepseek",
+            api_key=key,
+            model=s.deepseek_model,
+            base_url=s.openai_base_url or s.deepseek_base_url,
+        )
+    if p == "openai":
+        if not s.openai_api_key:
+            raise ValueError("openai not configured: OPENAI_API_KEY is empty")
+        return _OpenAICompatibleClient(
+            provider="openai",
+            api_key=s.openai_api_key,
+            model=s.openai_model,
+            base_url=s.openai_base_url,
+        )
+    if p == "gemini":
+        key = s.gemini_api_key or s.openai_api_key
+        if not key:
+            raise ValueError("gemini not configured: GEMINI_API_KEY is empty")
+        return _OpenAICompatibleClient(
+            provider="gemini",
+            api_key=key,
+            model=s.gemini_model,
+            base_url=s.openai_base_url or s.gemini_base_url,
+        )
+    raise ValueError(f"unknown LLM_PROVIDER: {provider}")
+
+
+def get_llm_client(provider: str | None = None) -> _BaseClient:
+    """Return a cached client for `provider`. Falls back to LLM_PROVIDER default."""
+    p = (provider or get_settings().llm_provider).lower()
+    if p not in _cache:
+        _cache[p] = _build_client(p)
+    return _cache[p]
+
+
+def available_providers() -> dict[str, dict]:
+    """Return a map of {provider_name: {"available": bool, "model": str}}.
+
+    Used by the frontend to populate the provider dropdown — only show options
+    that have a key configured.
+    """
+    s = get_settings()
+    return {
+        "anthropic": {"available": bool(s.anthropic_api_key), "model": s.anthropic_model},
+        "deepseek":  {"available": bool(s.deepseek_api_key or s.openai_api_key), "model": s.deepseek_model},
+        "openai":    {"available": bool(s.openai_api_key), "model": s.openai_model},
+        "gemini":    {"available": bool(s.gemini_api_key or s.openai_api_key), "model": s.gemini_model},
+    }

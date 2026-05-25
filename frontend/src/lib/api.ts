@@ -42,17 +42,36 @@ export type StatsResponse = {
 export async function sendChat(
   message: string,
   sessionId: string | null,
+  provider: string | null,
   signal?: AbortSignal,
 ): Promise<ChatResponse> {
   const res = await fetch(`${BASE}/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message, session_id: sessionId }),
+    body: JSON.stringify({ message, session_id: sessionId, provider }),
     signal,
   });
   if (!res.ok) {
     throw new Error(`chat failed: ${res.status}`);
   }
+  return res.json();
+}
+
+export type ProviderInfo = {
+  name: string;
+  available: boolean;
+  model: string;
+  is_default: boolean;
+};
+
+export type ProvidersResponse = {
+  default: string;
+  providers: ProviderInfo[];
+};
+
+export async function listProviders(): Promise<ProvidersResponse> {
+  const res = await fetch(`${BASE}/providers`);
+  if (!res.ok) throw new Error(`providers failed: ${res.status}`);
   return res.json();
 }
 
@@ -75,12 +94,13 @@ export type StreamEvent =
 export async function* sendChatStream(
   message: string,
   sessionId: string | null,
+  provider: string | null,
   signal?: AbortSignal,
 ): AsyncGenerator<StreamEvent> {
   const res = await fetch(`${BASE}/chat/stream`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
-    body: JSON.stringify({ message, session_id: sessionId }),
+    body: JSON.stringify({ message, session_id: sessionId, provider }),
     signal,
   });
   if (!res.ok || !res.body) {
