@@ -29,8 +29,9 @@ class Settings(BaseSettings):
 
     # Gemini via Google's OpenAI-compatible endpoint.
     # https://ai.google.dev/gemini-api/docs/openai
+    # Default to 2.5-pro because 2.5-flash hits free-tier rate limits fast.
     gemini_api_key: str = ""
-    gemini_model: str = "gemini-2.0-flash"
+    gemini_model: str = "gemini-2.5-pro"
     gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai/"
 
     # ------ Storage ------
@@ -112,7 +113,7 @@ DEFAULT_PRICING: dict[str, tuple[float, float]] = {
     "anthropic": (3.00, 15.00),     # Claude Sonnet 4
     "deepseek": (0.27, 1.10),       # deepseek-chat (cache-miss)
     "openai": (0.15, 0.60),         # gpt-4o-mini
-    "gemini": (0.10, 0.40),         # gemini-2.0-flash
+    "gemini": (1.25, 10.00),        # gemini-2.5-pro (≤200K context tier)
 }
 
 

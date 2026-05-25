@@ -12,7 +12,7 @@ data:
   ANTHROPIC_MODEL: "claude-sonnet-4-20250514"
   OPENAI_MODEL: "gpt-4o-mini"
   OPENAI_BASE_URL: ""
-  GEMINI_MODEL: "gemini-2.0-flash"
+  GEMINI_MODEL: "gemini-2.5-pro"
   GEMINI_BASE_URL: "https://generativelanguage.googleapis.com/v1beta/openai/"
 
   POSTGRES_USER: "ollive"

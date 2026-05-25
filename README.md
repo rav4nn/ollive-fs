@@ -115,7 +115,7 @@ All via env (see `.env.example`):
 | `ANTHROPIC_API_KEY` / `ANTHROPIC_MODEL` | / `claude-sonnet-4-20250514` | |
 | `DEEPSEEK_API_KEY` / `DEEPSEEK_MODEL` | / `deepseek-chat` | |
 | `OPENAI_API_KEY` / `OPENAI_MODEL` / `OPENAI_BASE_URL` | / `gpt-4o-mini` / — | |
-| `GEMINI_API_KEY` / `GEMINI_MODEL` | / `gemini-2.0-flash` | Uses Google's OpenAI-compatible endpoint |
+| `GEMINI_API_KEY` / `GEMINI_MODEL` | / `gemini-2.5-pro` | Uses Google's OpenAI-compatible endpoint |
 | `DATABASE_URL` | `postgresql+asyncpg://...` | async URL |
 | `REDIS_URL` | `redis://redis:6379/0` | empty disables event bus → synchronous DB path |
 | `AGGREGATION_INTERVAL_SECONDS` | `60` | per-session + per-minute rollup tick |
