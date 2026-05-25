@@ -56,6 +56,78 @@ export async function sendChat(
   return res.json();
 }
 
+export type StreamEvent =
+  | { type: "session"; session_id: string }
+  | { type: "delta"; text: string }
+  | {
+      type: "done";
+      status: "ok" | "error";
+      error_message: string | null;
+      usage: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+      latency_ms: number;
+      time_to_first_token_ms: number | null;
+      provider: string;
+      model: string;
+    };
+
+/** Open an SSE stream for a chat turn. The async iterator yields one event per
+ * SSE frame and ends when the server closes the connection. */
+export async function* sendChatStream(
+  message: string,
+  sessionId: string | null,
+  signal?: AbortSignal,
+): AsyncGenerator<StreamEvent> {
+  const res = await fetch(`${BASE}/chat/stream`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+    body: JSON.stringify({ message, session_id: sessionId }),
+    signal,
+  });
+  if (!res.ok || !res.body) {
+    throw new Error(`stream failed: ${res.status}`);
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  let currentEvent = "message";
+
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+
+      // SSE frames are separated by a blank line.
+      let sepIdx: number;
+      while ((sepIdx = buf.indexOf("\n\n")) !== -1) {
+        const frame = buf.slice(0, sepIdx);
+        buf = buf.slice(sepIdx + 2);
+
+        let evt = currentEvent;
+        let data = "";
+        for (const line of frame.split("\n")) {
+          if (line.startsWith("event:")) {
+            evt = line.slice(6).trim();
+          } else if (line.startsWith("data:")) {
+            data += line.slice(5).trimStart();
+          }
+        }
+        currentEvent = "message";
+        if (!data) continue;
+        try {
+          const parsed = JSON.parse(data);
+          yield { type: evt as StreamEvent["type"], ...parsed } as StreamEvent;
+        } catch {
+          // skip unparseable frame
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 export async function listSessions(): Promise<SessionSummary[]> {
   const res = await fetch(`${BASE}/sessions`);
   if (!res.ok) throw new Error(`sessions failed: ${res.status}`);

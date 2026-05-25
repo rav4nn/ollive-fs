@@ -79,6 +79,8 @@ class InferenceLog(Base):
     completion_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     total_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     latency_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Time-to-first-token, only set on streaming calls.
+    time_to_first_token_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     input_text: Mapped[str] = mapped_column(Text, nullable=False, default="")
     output_text: Mapped[str] = mapped_column(Text, nullable=False, default="")
     cost_estimate: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)

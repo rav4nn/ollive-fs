@@ -1,4 +1,7 @@
+import json
+
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -13,12 +16,14 @@ from app.api.schemas import (
     StatsResponse,
 )
 from app.db.models import InferenceStats, Session
-from app.db.session import get_db
+from app.db.session import SessionLocal, get_db
 from app.services.chat_service import (
     get_session_messages,
     handle_chat,
+    handle_chat_stream,
     list_sessions,
 )
+from app.services.llm_client import LLMResult
 
 router = APIRouter()
 
@@ -37,6 +42,64 @@ async def health(db: AsyncSession = Depends(get_db)) -> HealthResponse:
 async def chat(req: ChatRequest, db: AsyncSession = Depends(get_db)) -> ChatResponse:
     text_out, sid = await handle_chat(db, req.session_id, req.message)
     return ChatResponse(session_id=sid, response=text_out)
+
+
+def _sse(event: str, data: dict) -> bytes:
+    """Format one Server-Sent Events frame."""
+    return f"event: {event}\ndata: {json.dumps(data)}\n\n".encode("utf-8")
+
+
+@router.post("/chat/stream")
+async def chat_stream(req: ChatRequest) -> StreamingResponse:
+    """Stream the assistant response as SSE.
+
+    Frames:
+      event: session   data: {"session_id": "..."}     (once, first)
+      event: delta     data: {"text": "..."}            (many, each token chunk)
+      event: done      data: {"usage": {...}, "status": "ok"|"error", ...}  (once, last)
+    """
+
+    async def gen():
+        # Use our own DB session so the generator's lifetime isn't tied to
+        # FastAPI's request-scoped Depends teardown (which closes the session
+        # when the handler returns, before we've finished streaming).
+        async with SessionLocal() as db:
+            try:
+                async for kind, value in handle_chat_stream(db, req.session_id, req.message):
+                    if kind == "session":
+                        yield _sse("session", {"session_id": value})
+                    elif kind == "delta":
+                        yield _sse("delta", {"text": value})
+                    elif kind == "done":
+                        assert isinstance(value, LLMResult)
+                        yield _sse(
+                            "done",
+                            {
+                                "status": value.status,
+                                "error_message": value.error_message,
+                                "usage": {
+                                    "prompt_tokens": value.prompt_tokens,
+                                    "completion_tokens": value.completion_tokens,
+                                    "total_tokens": value.total_tokens,
+                                },
+                                "latency_ms": value.latency_ms,
+                                "time_to_first_token_ms": value.time_to_first_token_ms,
+                                "provider": value.provider,
+                                "model": value.model,
+                            },
+                        )
+            except Exception as exc:
+                yield _sse("done", {"status": "error", "error_message": str(exc)})
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",  # disable nginx response buffering
+            "Connection": "keep-alive",
+        },
+    )
 
 
 @router.get("/sessions", response_model=list[SessionSummary])

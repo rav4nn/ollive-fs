@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import AsyncIterator
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.db.models import Message, Session, utcnow
 from app.services.inference_logger import InferencePayload, write_inference_log
-from app.services.llm_client import get_llm_client
+from app.services.llm_client import LLMResult, get_llm_client
 from app.services.pricing import estimate_cost
 
 logger = logging.getLogger(__name__)
@@ -103,6 +104,78 @@ async def handle_chat(
             sid,
         )
     return result.text, sid
+
+
+async def handle_chat_stream(
+    db: AsyncSession, session_id: str | None, user_message: str
+) -> AsyncIterator[tuple[str, str | LLMResult]]:
+    """Streaming variant of handle_chat.
+
+    Yields ("session", session_id) once at the start so the client knows the
+    session id immediately, then ("delta", text) for each token chunk, and
+    finally ("done", LLMResult). Persistence (assistant message + inference
+    log) happens AFTER the stream completes so a single transaction captures
+    the final state with correct token counts.
+    """
+    settings = get_settings()
+    sid = session_id or new_session_id()
+
+    session_row = await _get_or_create_session(db, sid)
+    db.add(Message(session_id=sid, role="user", content=user_message))
+    await db.flush()
+
+    history = await _load_history(db, sid, settings.max_history_messages)
+    messages = [{"role": m.role, "content": m.content} for m in history]
+
+    yield ("session", sid)
+
+    llm = get_llm_client()
+    final: LLMResult | None = None
+    async for item in llm.chat_stream(messages=messages, system=SYSTEM_PROMPT, max_tokens=1024):
+        if isinstance(item, str):
+            yield ("delta", item)
+        else:
+            final = item
+
+    # Defensive: a provider that yields nothing terminal still needs a result.
+    if final is None:
+        final = LLMResult(
+            text="",
+            provider=llm.provider,
+            model=llm.model,
+            prompt_tokens=0,
+            completion_tokens=0,
+            total_tokens=0,
+            latency_ms=0,
+            status="error",
+            error_message="stream ended without a terminal result",
+        )
+
+    if final.status == "ok" and final.text:
+        db.add(Message(session_id=sid, role="assistant", content=final.text))
+
+    session_row.last_active_at = utcnow()
+    await db.commit()
+
+    cost = estimate_cost(final.prompt_tokens, final.completion_tokens)
+    payload = InferencePayload(
+        session_id=sid,
+        provider=final.provider,
+        model_name=final.model,
+        prompt_tokens=final.prompt_tokens,
+        completion_tokens=final.completion_tokens,
+        total_tokens=final.total_tokens,
+        latency_ms=final.latency_ms,
+        input_text=user_message,
+        output_text=final.text,
+        cost_estimate=cost,
+        status=final.status,
+        error_message=final.error_message,
+        time_to_first_token_ms=final.time_to_first_token_ms,
+    )
+    await write_inference_log(db, payload)
+
+    yield ("done", final)
 
 
 async def list_sessions(db: AsyncSession, limit: int = 50) -> list[Session]:

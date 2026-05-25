@@ -5,7 +5,7 @@ import {
   getSessionMessages,
   listSessions,
   MessageOut,
-  sendChat,
+  sendChatStream,
   SessionSummary,
 } from "@/lib/api";
 
@@ -78,28 +78,64 @@ export default function Chat() {
       if (!text || pending) return;
 
       const userMsg: ChatMessage = { role: "user", content: text };
-      setMessages((m) => [...m, userMsg]);
+      // Append the user turn AND an empty assistant placeholder we'll stream into.
+      setMessages((m) => [...m, userMsg, { role: "assistant", content: "" }]);
       setInput("");
       setPending(true);
 
       const ctrl = new AbortController();
       abortRef.current = ctrl;
+
+      // Mutate the last (assistant) message as deltas arrive.
+      const appendDelta = (chunk: string) => {
+        setMessages((m) => {
+          const next = m.slice();
+          const last = next[next.length - 1];
+          if (last && last.role === "assistant") {
+            next[next.length - 1] = { ...last, content: last.content + chunk };
+          }
+          return next;
+        });
+      };
+
+      const replaceAssistant = (content: string) => {
+        setMessages((m) => {
+          const next = m.slice();
+          const last = next[next.length - 1];
+          if (last && last.role === "assistant") {
+            next[next.length - 1] = { ...last, content };
+          }
+          return next;
+        });
+      };
+
       try {
-        const res = await sendChat(text, sessionId, ctrl.signal);
-        if (!sessionId) setSessionId(res.session_id);
-        setMessages((m) => [...m, { role: "assistant", content: res.response }]);
+        for await (const evt of sendChatStream(text, sessionId, ctrl.signal)) {
+          if (evt.type === "session") {
+            if (!sessionId) setSessionId(evt.session_id);
+          } else if (evt.type === "delta") {
+            appendDelta(evt.text);
+          } else if (evt.type === "done") {
+            if (evt.status === "error") {
+              replaceAssistant(`Error: ${evt.error_message ?? "unknown"}`);
+            }
+          }
+        }
         refreshSessions();
       } catch (err: any) {
         if (err?.name === "AbortError") {
-          setMessages((m) => [
-            ...m,
-            { role: "assistant", content: "(canceled)" },
-          ]);
+          // Preserve any partial text and append a hint.
+          setMessages((m) => {
+            const next = m.slice();
+            const last = next[next.length - 1];
+            if (last && last.role === "assistant") {
+              const suffix = last.content ? " (canceled)" : "(canceled)";
+              next[next.length - 1] = { ...last, content: last.content + suffix };
+            }
+            return next;
+          });
         } else {
-          setMessages((m) => [
-            ...m,
-            { role: "assistant", content: `Error: ${err?.message ?? "unknown"}` },
-          ]);
+          replaceAssistant(`Error: ${err?.message ?? "unknown"}`);
         }
       } finally {
         setPending(false);
@@ -160,16 +196,18 @@ export default function Chat() {
           {messages.length === 0 && (
             <div className="empty-state">Start the conversation.</div>
           )}
-          {messages.map((m, i) => (
-            <div key={i} className={`message ${m.role}`}>
-              <div className="bubble">{m.content}</div>
-            </div>
-          ))}
-          {pending && (
-            <div className="message assistant">
-              <div className="bubble" style={{ opacity: 0.7 }}>…</div>
-            </div>
-          )}
+          {messages.map((m, i) => {
+            const isLast = i === messages.length - 1;
+            const showCursor = pending && isLast && m.role === "assistant";
+            return (
+              <div key={i} className={`message ${m.role}`}>
+                <div className="bubble">
+                  {m.content}
+                  {showCursor && <span className="cursor" aria-hidden>▍</span>}
+                </div>
+              </div>
+            );
+          })}
         </div>
 
         <form className="composer" onSubmit={onSubmit}>

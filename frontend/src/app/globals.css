@@ -162,6 +162,17 @@ input, textarea {
   border-bottom-left-radius: 4px;
 }
 
+.cursor {
+  display: inline-block;
+  margin-left: 2px;
+  color: var(--accent);
+  animation: blink 1s steps(1) infinite;
+  font-weight: 600;
+}
+@keyframes blink {
+  50% { opacity: 0; }
+}
+
 .composer {
   border-top: 1px solid var(--border);
   padding: 16px 24px;

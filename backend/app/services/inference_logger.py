@@ -33,6 +33,8 @@ class InferencePayload:
     cost_estimate: float
     status: str = "ok"
     error_message: str | None = None
+    # Only populated for streaming calls.
+    time_to_first_token_ms: int | None = None
 
     def to_json(self) -> str:
         d = asdict(self)
@@ -51,6 +53,7 @@ async def write_inference_log(db: AsyncSession, payload: InferencePayload) -> No
             completion_tokens=payload.completion_tokens,
             total_tokens=payload.total_tokens,
             latency_ms=payload.latency_ms,
+            time_to_first_token_ms=payload.time_to_first_token_ms,
             input_text=payload.input_text,
             output_text=payload.output_text,
             cost_estimate=payload.cost_estimate,
