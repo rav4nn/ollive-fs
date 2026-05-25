@@ -8,13 +8,13 @@ server {
 
     # /chat is non-streaming JSON
     location = /chat {
-        proxy_pass http://127.0.0.1:8001;
+        proxy_pass http://127.0.0.1:30001;
         include /etc/nginx/snippets/ollive-proxy.conf;
         proxy_read_timeout 120s;
     }
     # /chat/stream is SSE — disable buffering so each token frame flushes.
     location = /chat/stream {
-        proxy_pass http://127.0.0.1:8001;
+        proxy_pass http://127.0.0.1:30001;
         include /etc/nginx/snippets/ollive-proxy.conf;
         proxy_buffering off;
         proxy_cache off;
@@ -22,14 +22,14 @@ server {
         chunked_transfer_encoding on;
     }
 
-    location = /health     { proxy_pass http://127.0.0.1:8001; include /etc/nginx/snippets/ollive-proxy.conf; }
-    location = /stats      { proxy_pass http://127.0.0.1:8001; include /etc/nginx/snippets/ollive-proxy.conf; }
-    location ^~ /stats/    { proxy_pass http://127.0.0.1:8001; include /etc/nginx/snippets/ollive-proxy.conf; }
-    location = /sessions   { proxy_pass http://127.0.0.1:8001; include /etc/nginx/snippets/ollive-proxy.conf; }
-    location ^~ /sessions/ { proxy_pass http://127.0.0.1:8001; include /etc/nginx/snippets/ollive-proxy.conf; }
+    location = /health     { proxy_pass http://127.0.0.1:30001; include /etc/nginx/snippets/ollive-proxy.conf; }
+    location = /stats      { proxy_pass http://127.0.0.1:30001; include /etc/nginx/snippets/ollive-proxy.conf; }
+    location ^~ /stats/    { proxy_pass http://127.0.0.1:30001; include /etc/nginx/snippets/ollive-proxy.conf; }
+    location = /sessions   { proxy_pass http://127.0.0.1:30001; include /etc/nginx/snippets/ollive-proxy.conf; }
+    location ^~ /sessions/ { proxy_pass http://127.0.0.1:30001; include /etc/nginx/snippets/ollive-proxy.conf; }
 
     location / {
-        proxy_pass http://127.0.0.1:3010;
+        proxy_pass http://127.0.0.1:30000;
         include /etc/nginx/snippets/ollive-proxy.conf;
     }
 

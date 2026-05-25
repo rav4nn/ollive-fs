@@ -1,0 +1,52 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: ollive
+  labels: { app: backend }
+spec:
+  replicas: 1   # safe to scale up — Redis consumer group handles concurrency
+  selector:
+    matchLabels: { app: backend }
+  template:
+    metadata:
+      labels: { app: backend }
+    spec:
+      containers:
+        - name: backend
+          image: ollive/backend:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef: { name: ollive-config }
+            - secretRef:    { name: ollive-secret }
+          env:
+            # Each pod gets a unique consumer name so Redis can split work
+            # across replicas if you scale up.
+            - name: REDIS_CONSUMER_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+          readinessProbe:
+            httpGet: { path: /health, port: 8000 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /health, port: 8000 }
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            requests: { cpu: "50m",  memory: "192Mi" }
+            limits:   { cpu: "1000m", memory: "512Mi" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  namespace: ollive
+spec:
+  type: NodePort
+  selector: { app: backend }
+  ports:
+    - port: 8000
+      targetPort: 8000
+      nodePort: 30001
