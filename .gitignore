@@ -32,6 +32,9 @@ yarn-error.log*
 .env.*.local
 !.env.example
 
+# Personal scratch / unshared notes
+local/
+
 # OS
 .DS_Store
 Thumbs.db
