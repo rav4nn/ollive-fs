@@ -3,159 +3,183 @@
 ## High-level
 
 ```
-                ┌──────────────────────┐
-   user ──► UI  │  Next.js (port 3000) │
-                └──────────┬───────────┘
-                           │ fetch JSON
-                           ▼
-                ┌──────────────────────────────────────────────┐
-                │  FastAPI backend (port 8000)                 │
-                │                                              │
-                │   /chat ──► chat_service ──► claude_client   │
-                │                  │                ▲          │
-                │                  │ writes         │ Anthropic │
-                │                  ▼                │ SDK       │
-                │            sessions + messages   ─┘           │
-                │                  │                            │
-                │                  ▼                            │
-                │            inference_logs (append-only)       │
-                │                                              │
-                │   ▲ every 60s ▲                              │
-                │   │           │                              │
-                │   └── ingestion worker ──► inference_stats   │
-                │                                              │
-                │   /stats reads inference_stats               │
-                └──────────────────────┬───────────────────────┘
-                                       │
+                            ┌──────────────────────┐
+   user ──► UI               │  Next.js (port 3000) │
+                            └──────────┬───────────┘
+                                       │ fetch / SSE
                                        ▼
-                              ┌────────────────┐
-                              │  PostgreSQL    │
-                              └────────────────┘
+            ┌─────────────────────────────────────────────────────┐
+            │  FastAPI backend                                    │
+            │                                                     │
+            │   POST /chat ──────► chat_service ──► llm_client    │
+            │                          │                ▲         │
+            │                          │ deltas         │ provider│
+            │   POST /chat/stream ─────┘                │ (Anthr. │
+            │   (SSE)                                   │  / DSeek│
+            │                                           │  / OAI  │
+            │                          ▼                │  / Gem.)│
+            │            sessions + messages (Postgres) │         │
+            │                          │                │         │
+            │                          ▼                │         │
+            │            inference_logger ──► Redis ────┘         │
+            │                              Stream                 │
+            │                              ▲                      │
+            │                              │ XADD                 │
+            │                              │                      │
+            │  log_consumer (XREADGROUP) ──┘──► inference_logs    │
+            │                                       │             │
+            │  ingestion worker ──► inference_stats │             │
+            │  (every 60s)        + inference_buckets             │
+            │                                                     │
+            │  /stats reads inference_stats                       │
+            │  /stats/timeseries reads inference_buckets          │
+            └─────────────────────────────────────────────────────┘
 ```
 
-The ingestion worker is an `asyncio.Task` spawned in the FastAPI lifespan, so
-the stack is just two long-running processes (backend + frontend) plus
-Postgres. No external queue, no Celery, no Redis. The cost is that the worker
-shares the backend's process; the win is one container instead of three and a
-much simpler runbook.
+The three long-running async tasks live inside the FastAPI process via the
+lifespan context manager: the **log consumer** (drains Redis stream into
+Postgres), the **aggregation worker** (per-session and per-minute rollups
+every 60s), and uvicorn itself. The trade is one process to operate vs.
+separate worker pods. To scale the consumer horizontally, run multiple
+backend pods; each gets a unique `REDIS_CONSUMER_NAME` from the k8s downward
+API and the Redis consumer group splits the work automatically.
 
 ## Ingestion flow
 
-1. `POST /chat` is called.
-2. `chat_service.handle_chat` loads (or creates) the session, appends the user
-   message, calls Claude, appends the assistant message, **commits**.
-3. After the commit, it builds an `InferencePayload` and calls
-   `write_inference_log`, which inserts one row into `inference_logs` in its
-   own transaction. `aggregated_at` defaults to `NULL`.
-4. The response is returned to the client.
-5. Every 60s, `workers/ingestion.run_worker` queries
-   `inference_logs WHERE aggregated_at IS NULL`, batches them (≤ 5000 rows per
-   tick), groups by `session_id`, and upserts into `inference_stats` via
-   Postgres `INSERT ... ON CONFLICT DO UPDATE`. Consumed rows are marked
-   `aggregated_at = NOW()` in the same transaction.
-
-Putting the upsert + the mark-as-consumed in **one transaction** is the key
-correctness property: either both happen or neither does. If the tick crashes
-midway, the next tick picks up where this one left off.
+1. `POST /chat` (or `/chat/stream`) calls `handle_chat()` /
+   `handle_chat_stream()`, which loads/creates the session, appends the user
+   message, calls the LLM, appends the assistant message, **commits**.
+2. After the commit, builds an `InferencePayload` and calls
+   `write_inference_log()`.
+3. `write_inference_log()` tries **three tiers** in order:
+   1. `event_bus.publish()` → `XADD inference_logs ...` to Redis (success
+      path)
+   2. If Redis is unavailable, falls back to a direct `INSERT INTO
+      inference_logs ...`
+   3. If the DB write also fails, emits a single JSON line on stderr as
+      `INFERENCE_LOG_FALLBACK ...` so operators can replay from container
+      logs
+4. The log consumer (`workers/log_consumer.py`) runs `XREADGROUP` in a loop
+   with `block=5000ms`. On a batch arrival, it inserts all rows in one
+   transaction, then `XACK`s. Unacked messages stay in the consumer's PEL
+   and are reprocessed on the next loop.
+5. The aggregation worker (`workers/ingestion.py`) wakes every 60s, scans
+   `inference_logs WHERE aggregated_at IS NULL`, groups them by
+   `session_id` (for `inference_stats`) and by minute via
+   `date_trunc('minute', ts)` (for `inference_buckets`), upserts both via
+   Postgres `INSERT ... ON CONFLICT DO UPDATE`, and marks the consumed log
+   rows with `aggregated_at = NOW()` — all in one transaction.
 
 ## Logging strategy
 
 > "Never drop a log entry even if the aggregation step fails."
 
-The system guarantees this in three layers:
+Three layers of durability:
 
-1. **Raw write durability** — every Claude call produces an
-   `inference_logs` row, committed before the HTTP response goes back to the
-   client. If Postgres is down, `write_inference_log` falls back to a single
-   structured JSON line on stderr (`INFERENCE_LOG_FALLBACK …`) so an operator
-   can replay it from container logs.
+1. **Three-tier write path** (Redis → Postgres → stderr JSON) — described
+   above. Every successful chat call emits a log somewhere.
 2. **Idempotent aggregation** — the worker filters `WHERE aggregated_at IS
-   NULL`, so a retry never double-counts. The `update ... set aggregated_at`
-   and the upsert are in the same transaction.
-3. **Bounded backlog** — the worker processes at most `BATCH_LIMIT = 5000`
-   rows per tick. If the system is offline for a while, it catches up over
-   subsequent ticks instead of trying to do everything at once and OOMing.
+   NULL`, so a retry never double-counts. The "upsert stats + buckets" and
+   the "mark as consumed" both run in the same transaction.
+3. **Bounded backlog** — `BATCH_LIMIT = 5000`. If the system was offline
+   for a while, it catches up over multiple ticks instead of trying to
+   process everything at once and OOMing.
 
-The raw `inference_logs` table is **append-only and never deleted by the
-application**. Operators can run a retention job (`DELETE WHERE aggregated_at <
-NOW() - INTERVAL '30 days'`) without affecting `inference_stats`.
+The `inference_logs` table is **append-only and never deleted by the
+application**. Operators can run a retention job (`DELETE WHERE
+aggregated_at < NOW() - INTERVAL '30 days'`) without touching
+`inference_stats` or `inference_buckets`.
+
+## PII redaction
+
+When `REDACT_PII=true`, `chat_service` calls `pii.maybe_redact()` on the
+user message and assistant text **before** they go into the
+`InferencePayload`. Originals still flow to the LLM and back — we just
+don't keep them in the DB. Patterns covered:
+
+| Type | Placeholder |
+| --- | --- |
+| Email | `[REDACTED:EMAIL]` |
+| Credit card (13–16 digits) | `[REDACTED:CREDIT_CARD]` |
+| SSN-like (`xxx-xx-xxxx`) | `[REDACTED:SSN]` |
+| Phone (many formats) | `[REDACTED:PHONE]` |
+| IPv4 | `[REDACTED:IP]` |
+
+Regex is the cheap first layer. A production system should layer a proper
+NER pass on top to catch names, addresses, and free-form PII the regex
+can't see.
 
 ## Schema decisions
 
-**Sessions vs. messages vs. logs.** Three tables, three lifetimes:
+**Three tables, three lifetimes:**
 
-- `sessions` is mutable metadata (last_active_at moves forward each turn).
-- `messages` is the conversational truth — what we send to the model on the
-  next turn.
-- `inference_logs` is the audit trail — what *actually* happened on the wire
-  (latency, tokens, error). These can diverge: a Claude error means a `messages`
-  row for "user" but no "assistant", and an `inference_logs` row with
-  `status="error"`.
+- `sessions` — mutable metadata (`last_active_at` moves forward each turn)
+- `messages` — append-only chat history sent back to the model on each
+  turn
+- `inference_logs` — append-only audit trail of every wire call (latency,
+  tokens, error). Diverges from `messages` on errors (one user message,
+  zero assistant messages, one error log)
+- `inference_stats` — per-session denormalized rollup
+- `inference_buckets` — per-minute denormalized time-series, primary key on
+  `bucket_ts` (UTC truncated to minute)
 
-Splitting them keeps `messages` small and hot-path (chat replay) while
-`inference_logs` grows linearly with traffic and can be aged out.
+Splitting them keeps `messages` small and hot-path. `inference_logs`
+grows linearly with traffic and is the table you'd age out.
 
-**Stats table.** `inference_stats` is a denormalized rollup. We could
-recompute from `inference_logs` on every `/stats` request, but on a busy
-deployment that scan is wasted work. Aggregating once per minute trades ≤ 60s
-of staleness for O(1) stats reads.
+**Indexes:**
 
-**Indexes.**
-- `(session_id, created_at)` on `messages` — drives history loading.
-- `(session_id, timestamp)` on `inference_logs` — drives per-session
-  forensics.
-- `(aggregated_at)` on `inference_logs` — drives the worker's "give me
-  unprocessed rows" query. Without this it would be a full table scan every
-  60s.
+- `(session_id, created_at)` on `messages` — drives history loading
+- `(session_id, timestamp)` on `inference_logs` — per-session forensics
+- `(aggregated_at)` on `inference_logs` — the worker's "give me unprocessed
+  rows" query
+- Primary key on `bucket_ts` for `inference_buckets` — orders the
+  timeseries query naturally
 
 ## Scaling considerations
 
-The current design happily handles ~hundreds of chats/sec on a single
-Hetzner box. To go further:
-
-- **Stateless backend**: nothing in-process besides the worker is stateful, so
-  the backend itself can be replicated behind a load balancer. The worker is
-  designed to be safe under multiple concurrent runners — the `update`
-  filtering by `aggregated_at IS NULL` is a single SQL statement, and the
-  upsert is conflict-safe — but for cleanliness you'd pin it to one replica
-  (or use Postgres advisory locks).
-- **Postgres**: read replicas for `/stats`, partition `inference_logs` by
-  timestamp once it crosses ~10M rows.
-- **Decouple ingestion from request path**: move from "insert in request
-  handler" to "write to Redis Stream / NATS, worker drains". This makes the
-  request latency independent of DB write latency.
-- **Streaming Claude responses**: switch `claude_client.chat` to
-  `messages.stream`, push tokens via SSE/WebSocket. The inference log can
-  still be written once the stream completes, with `latency_ms` capturing
-  time-to-first-token and time-to-completion separately.
+- **Backend pods**: stateless from the chat-handler POV; the Redis consumer
+  group splits log-write work across replicas. Scale with
+  `kubectl scale deploy/backend --replicas=N`. The aggregation worker
+  inside the lifespan will run on every replica — for now that's fine
+  (the SQL is idempotent), but for many replicas you'd want a Postgres
+  advisory lock to elect one leader.
+- **Postgres**: read replicas for `/stats` / `/stats/timeseries`. Partition
+  `inference_logs` by timestamp once it crosses ~10M rows.
+- **Redis Streams**: easy first improvement is **consumer-group sharding**
+  by `session_id` hash. The stream itself is single-shard until you go to
+  Redis Cluster.
+- **Streaming**: TTFT is captured and stored; next step would be also
+  emitting a per-token timing event so you can chart inter-token latency.
 
 ## Failure handling assumptions
 
-- **Claude API errors** are caught in `ClaudeClient.chat` and surface as a
-  `ClaudeResult` with `status="error"`. The chat endpoint returns a friendly
-  fallback message and still writes an inference log row with status="error",
-  so error rates are visible on the dashboard.
-- **DB outage on the request path**: the user-facing chat will 500, but the
-  fallback path in `write_inference_log` still tries to emit a structured log
-  line so the data isn't gone (operators can rebuild from logs).
-- **Worker crash**: the worker's outer `try` catches all exceptions and waits
-  one interval before retrying. Since aggregation is filter-by-NULL, the worker
-  is naturally restart-safe.
-- **Schema drift**: the demo uses `create_all` on startup — this is safe for
-  greenfield deploys but you should swap to Alembic before the first migration
-  that drops or alters a column.
-- **Long Claude calls hold a DB connection**: the chat handler keeps its
-  session open across the Claude API call. On a small pool this can stall
-  other requests. Mitigation: split into two short DB transactions (one
-  before the API call, one after) — left as a follow-up to keep the demo
-  readable.
+- **LLM API errors** are caught in the client wrappers and surface as an
+  `LLMResult` with `status="error"`. The chat endpoint returns a friendly
+  fallback message and still writes an `inference_logs` row with
+  `status="error"`, so error rates are visible on the dashboard.
+- **Redis outage**: `publish()` returns False, the caller falls back to a
+  direct DB write. No data loss.
+- **Postgres outage on the request path**: the user-facing chat will 500.
+  The fallback path in `write_inference_log` emits a structured JSON line
+  on stderr so the data isn't gone — operators can rebuild from logs.
+- **Aggregation worker crash**: the outer try catches everything and waits
+  one interval before retrying. Aggregation is filter-by-NULL, so the
+  worker is naturally restart-safe.
+- **Consumer crash**: in-flight messages stay in the consumer's PEL and
+  get reprocessed on restart. Adding `XAUTOCLAIM` would let other
+  consumers steal stuck messages from a dead one.
+- **Schema drift**: `create_all` + an `_ADDITIVE_MIGRATIONS` list in
+  `init_db.py` handles add-column-if-not-exists. Anything more invasive
+  (rename, drop, change type) needs Alembic.
 
 ## Trade-offs we made
 
 | Choice | Win | Lose |
 | --- | --- | --- |
-| Worker inside backend process | One container, simple ops | Can't scale worker independently |
-| `create_all` instead of Alembic | No tooling to learn for a demo | Risky for schema changes |
-| Postgres rollup table | Cheap `/stats` reads | ≤ 60s staleness |
-| `localStorage` session id | No auth needed to "resume" | Clearing cookies loses your history |
-| Single shared port for API + UI behind Caddy in prod | Fewer DNS records, simpler CORS | Reverse-proxy config to maintain |
+| All long-running tasks inside backend lifespan | One container/process to operate | Worker can't scale independently of HTTP traffic (mitigated: scale backend replicas) |
+| Redis Streams (not Kafka/NATS) | Tiny ops surface, fits a single box | Single-shard streams; no cross-region replication out of the box |
+| `create_all` + tiny migration hook | No tooling to learn for additive changes | Risky for non-additive schema changes |
+| Per-minute buckets vs raw scan on each request | O(1) `/stats/timeseries` | ≤60s staleness |
+| Host nginx (not Traefik) + NodePorts | Doesn't disturb the other apps that already use host nginx | Two layers of L7 (nginx + service) instead of one |
+| Localhost `localStorage` session id | Trivial "resume", no auth | Clearing site data loses your history |
+| `--disable=traefik --disable=servicelb` on k3s | Coexists with host nginx without port conflict | Slightly less idiomatic k8s (no Ingress resource) — manifests still portable, just need a real ingress controller on a multi-app cluster |

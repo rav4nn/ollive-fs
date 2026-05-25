@@ -1,162 +1,129 @@
 # ollive — LLM Inference Logging & Ingestion
 
-A small, production-shaped chatbot that captures inference metadata for every LLM
-call, rolls it up in a background ingestion worker, and exposes a live
-observability dashboard.
+A production-shaped chatbot that captures every LLM call, ships the metadata
+through Redis Streams to a Postgres-backed ingestion pipeline, and surfaces
+live throughput / latency / cost / error charts on a small dashboard. Live at
+**https://ollive.hardeep.cv** running on a single-node k3s cluster behind
+Cloudflare DNS + Let's Encrypt.
 
-- **Backend**: FastAPI, Python 3.11, SQLAlchemy 2 (async), asyncpg
-- **Database**: PostgreSQL 16
-- **Frontend**: Next.js 14 (App Router, TypeScript)
-- **LLM**: pluggable — Anthropic (Claude), DeepSeek, or any OpenAI-compatible
-  provider. Switch with `LLM_PROVIDER=anthropic|deepseek|openai`.
-- **Container**: one-command `docker compose up`
+## Stack
 
----
+| Concern | Choice |
+| --- | --- |
+| Backend | FastAPI + SQLAlchemy 2 (async) + asyncpg |
+| Frontend | Next.js 14 (App Router, TypeScript) |
+| Database | PostgreSQL 16 |
+| Message bus | Redis 7 Streams (event-based ingestion) |
+| LLMs | **Anthropic, DeepSeek, OpenAI, Gemini** (provider selected via env) |
+| Streaming | Server-Sent Events (`/chat/stream`) |
+| Privacy | PII redaction at storage boundary (emails, phones, cards, SSN, IPs) |
+| Container | Docker Compose (one-command local) **and** k3s manifests (production) |
+| Observability | `/stats` (snapshot), `/stats/timeseries` (per-minute buckets), dashboard with sparklines |
 
-## Quick start
+## Quick start (local)
 
 ```bash
 cp .env.example .env
-# Pick ONE provider and set its key:
+# Pick a provider and add its key:
 #   LLM_PROVIDER=deepseek   DEEPSEEK_API_KEY=sk-...
 #   LLM_PROVIDER=anthropic  ANTHROPIC_API_KEY=sk-ant-...
 #   LLM_PROVIDER=openai     OPENAI_API_KEY=sk-...
+#   LLM_PROVIDER=gemini     GEMINI_API_KEY=...
 
 docker compose up --build
 ```
 
 Then open:
-- Chat UI:        http://localhost:3000
-- Dashboard:      http://localhost:3000/dashboard
-- API health:     http://localhost:8000/health
-- API stats:      http://localhost:8000/stats
+- Chat UI:    http://localhost:3000
+- Dashboard:  http://localhost:3000/dashboard
+- API health: http://localhost:8000/health
+- API stats:  http://localhost:8000/stats
 
-The Postgres tables are created automatically on backend startup.
+If host port 3000 is taken, set `FRONTEND_PORT=3001` in `.env`.
 
-If port 3000 is taken on your host, set `FRONTEND_PORT=3001` in `.env`.
+## Live deployment
 
----
-
-## What it does
-
-1. **Chat** (`POST /chat`) — multi-turn conversation with Claude. Sessions are
-   keyed by `session_id` (auto-generated on first message, then persisted in the
-   browser's `localStorage` so refreshing the page resumes the conversation).
-2. **Inference logging** — every call to Claude writes one row to
-   `inference_logs`: tokens, latency, input/output text, status, cost estimate.
-   If the DB write fails, the payload is emitted as a single structured JSON
-   log line on stderr so an operator can replay it from container logs.
-3. **Ingestion worker** — a background asyncio task in the backend process
-   wakes every `AGGREGATION_INTERVAL_SECONDS` (default 60s), grabs unprocessed
-   rows from `inference_logs`, groups them by `session_id`, and upserts the
-   rollup into `inference_stats` using a Postgres `INSERT ... ON CONFLICT DO
-   UPDATE`. Consumed rows are marked with `aggregated_at` so we never
-   double-count.
-4. **Stats endpoint** (`GET /stats`) — returns overall + per-session metrics
-   straight from the materialized `inference_stats` table.
-5. **Dashboard** — `/dashboard` polls `/stats` every 30s.
-
----
-
-## Project layout
+Production runs on a single Hetzner box with **k3s** (k8s without external
+load balancer or traefik), behind the existing host nginx for TLS:
 
 ```
-.
-├── docker-compose.yml
-├── .env.example
-├── backend/
-│   ├── Dockerfile
-│   ├── requirements.txt
-│   └── app/
-│       ├── main.py                 # FastAPI app + lifespan starts worker
-│       ├── config.py               # pydantic-settings
-│       ├── api/
-│       │   ├── routes.py           # /health /chat /stats /sessions
-│       │   └── schemas.py          # request/response models
-│       ├── db/
-│       │   ├── models.py           # SQLAlchemy ORM
-│       │   ├── session.py          # async engine + session factory
-│       │   └── init_db.py          # create_all on startup
-│       ├── services/
-│       │   ├── claude_client.py    # Anthropic SDK wrapper, captures latency
-│       │   ├── inference_logger.py # DB write w/ stderr-JSON fallback
-│       │   ├── chat_service.py     # orchestration
-│       │   └── pricing.py          # cost estimator
-│       └── workers/
-│           └── ingestion.py        # 60s aggregation loop
-├── frontend/
-│   ├── Dockerfile
-│   ├── package.json
-│   └── src/
-│       ├── app/
-│       │   ├── layout.tsx
-│       │   ├── page.tsx            # chat
-│       │   └── dashboard/page.tsx  # dashboard
-│       ├── components/
-│       │   ├── Chat.tsx
-│       │   ├── Dashboard.tsx
-│       │   └── TopBar.tsx
-│       └── lib/api.ts              # typed API client
-└── docs/
-    └── ARCHITECTURE.md
+                       Cloudflare DNS (ollive.hardeep.cv)
+                                      │
+                                      ▼
+                       Host nginx (80/443, Let's Encrypt)
+                                      │
+                  ┌───────────────────┴───────────────────┐
+                  │     proxy_pass to NodePorts           │
+                  │     /chat/* /stats/* /sessions/* etc  │
+                  │     → 127.0.0.1:30001 (backend)       │
+                  │     /                                 │
+                  │     → 127.0.0.1:30000 (frontend)      │
+                  └───────────────────┬───────────────────┘
+                                      ▼
+                          k3s NodePort layer
+                                      │
+            ┌─────────────────────────┼─────────────────────────┐
+            │           namespace=ollive                        │
+            │                                                   │
+            │   frontend ─── backend ──┬── redis (events)      │
+            │                          └── postgres (PVC)      │
+            └───────────────────────────────────────────────────┘
 ```
 
----
+See [deploy/k8s/README.md](deploy/k8s/README.md) for first-install and
+re-deploy commands. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the
+ingestion-pipeline + failure-handling deep dive.
+
+## What's in the box
+
+| Feature | Where |
+| --- | --- |
+| Multi-turn chat | `POST /chat` |
+| Streaming chat (SSE, token-by-token) | `POST /chat/stream` |
+| List / resume / cancel conversations | Sidebar + `localStorage` + AbortController |
+| Inference logging (model, tokens, latency, **TTFT**, cost, status) | `inference_logs` table |
+| Event-based pipeline | request → Redis Stream → consumer group → Postgres batch insert |
+| Per-session rollup | `inference_stats`, updated every 60s |
+| Per-minute time-series | `inference_buckets` (msg count, tokens, avg+p95 latency, errors, cost) |
+| Throughput / latency / error charts | Dashboard sparklines, refresh every 30s |
+| PII redaction at storage boundary | `app/services/pii.py`, gated by `REDACT_PII=true` |
+| Three-tier log durability | Redis → Postgres → stderr JSON; **never silently dropped** |
+| Multi-provider | `LLM_PROVIDER=anthropic\|deepseek\|openai\|gemini` |
+| Per-provider pricing defaults | Anthropic / DeepSeek / OpenAI / Gemini |
+| One-command Docker Compose | `docker compose up --build` |
+| Kubernetes manifests | `deploy/k8s/` |
 
 ## API
 
-| Method | Path                              | Body                                      | Returns                                |
-| ------ | --------------------------------- | ----------------------------------------- | -------------------------------------- |
-| GET    | `/health`                         | —                                         | `{status, db}`                         |
-| POST   | `/chat`                           | `{session_id?: string, message: string}`  | `{session_id, response}`               |
-| GET    | `/sessions`                       | —                                         | list of sessions                       |
-| GET    | `/sessions/{id}/messages`         | —                                         | full message history                   |
-| GET    | `/stats`                          | —                                         | `{overall, per_session[]}`             |
-
----
-
-## Schema
-
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full diagram and
-rationale. Summary:
-
-- `sessions` — one row per conversation. `id` is the user-facing handle.
-- `messages` — append-only chat log (`role`, `content`, indexed on
-  `(session_id, created_at)`).
-- `inference_logs` — append-only raw log of every LLM call. The source of
-  truth. Has an `aggregated_at` column so the worker can pick up unprocessed
-  rows safely.
-- `inference_stats` — derived/aggregated table. One row per session, refreshed
-  by the worker. Trades a small amount of staleness (≤ 60s) for cheap reads.
-
----
+| Method | Path | Body | Notes |
+| --- | --- | --- | --- |
+| GET    | `/health` | — | `{status, db}` |
+| POST   | `/chat` | `{session_id?, message}` | Waits for full response |
+| POST   | `/chat/stream` | `{session_id?, message}` | SSE: `session`, `delta×N`, `done` |
+| GET    | `/sessions` | — | Recent sessions |
+| GET    | `/sessions/{id}/messages` | — | Full history for a session |
+| GET    | `/stats` | — | Snapshot: overall + per-session |
+| GET    | `/stats/timeseries?minutes=N` | — | Per-minute buckets (default 60min) |
 
 ## Configuration
 
-All config is via environment variables (see `.env.example`):
+All via env (see `.env.example`):
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `LLM_PROVIDER` | `anthropic` | `anthropic` \| `deepseek` \| `openai` |
-| `ANTHROPIC_API_KEY` / `ANTHROPIC_MODEL` | / `claude-sonnet-4-20250514` | when provider=anthropic |
-| `DEEPSEEK_API_KEY` / `DEEPSEEK_MODEL` | / `deepseek-chat` | when provider=deepseek |
-| `OPENAI_API_KEY` / `OPENAI_MODEL` | / `gpt-4o-mini` | when provider=openai |
-| `OPENAI_BASE_URL` | — | optional override (e.g. any OpenAI-compatible host) |
+| `LLM_PROVIDER` | `anthropic` | `anthropic` \| `deepseek` \| `openai` \| `gemini` |
+| `ANTHROPIC_API_KEY` / `ANTHROPIC_MODEL` | / `claude-sonnet-4-20250514` | |
+| `DEEPSEEK_API_KEY` / `DEEPSEEK_MODEL` | / `deepseek-chat` | |
+| `OPENAI_API_KEY` / `OPENAI_MODEL` / `OPENAI_BASE_URL` | / `gpt-4o-mini` / — | |
+| `GEMINI_API_KEY` / `GEMINI_MODEL` | / `gemini-2.0-flash` | Uses Google's OpenAI-compatible endpoint |
 | `DATABASE_URL` | `postgresql+asyncpg://...` | async URL |
-| `AGGREGATION_INTERVAL_SECONDS` | `60` | worker tick |
+| `REDIS_URL` | `redis://redis:6379/0` | empty disables event bus → synchronous DB path |
+| `AGGREGATION_INTERVAL_SECONDS` | `60` | per-session + per-minute rollup tick |
 | `ALLOWED_ORIGINS` | `http://localhost:3000` | comma-separated |
-| `NEXT_PUBLIC_API_BASE_URL` | `http://localhost:8000` | baked into frontend at build time |
-| `FRONTEND_PORT` | `3000` | host port for the frontend container |
-
-Pricing for the cost estimator has built-in defaults per provider (Sonnet 4
-$3/$15, DeepSeek $0.27/$1.10, gpt-4o-mini $0.15/$0.60 per MTok). Override with
-`PRICE_PER_MILLION_INPUT_TOKENS` / `..._OUTPUT_TOKENS`.
-
----
+| `NEXT_PUBLIC_API_BASE_URL` | `http://localhost:8000` | baked into frontend build |
+| `REDACT_PII` | `false` | redact emails/phones/cards/SSN/IPs before storage |
 
 ## Tests
-
-The backend has a couple of unit-level smoke tests:
 
 ```bash
 cd backend
@@ -164,100 +131,18 @@ pip install -r requirements.txt pytest pytest-asyncio
 pytest -v
 ```
 
-(Requires Python 3.11+. The image is built on `python:3.11-slim`.)
+Currently covers pricing, schema validation, and PII redaction patterns.
 
----
+## What I'd still improve
 
-## Deploying to `ollive.hardeep.cv`
-
-Live deployment is on a Hetzner box behind host nginx + Let's Encrypt, with
-Cloudflare for DNS. This is the recipe that produced
-**https://ollive.hardeep.cv**.
-
-1. **Server** with Docker + nginx + Certbot already installed (any small
-   Hetzner box). The compose stack binds backend/frontend/postgres to
-   loopback only — nginx terminates TLS and proxies inward.
-
-2. **Sync the code** to the server, e.g.:
-   ```bash
-   rsync -azh --delete --exclude .git --exclude node_modules --exclude .env \
-     ./ root@SERVER_IP:/root/ollive/
-   ```
-
-3. **Write `/root/ollive/.env`** with prod values (loopback binds + free ports):
-   ```env
-   LLM_PROVIDER=deepseek
-   DEEPSEEK_API_KEY=sk-...
-   POSTGRES_USER=ollive
-   POSTGRES_PASSWORD=<strong-password>
-   POSTGRES_DB=ollive
-   BACKEND_BIND_HOST=127.0.0.1
-   BACKEND_PORT=8001
-   FRONTEND_BIND_HOST=127.0.0.1
-   FRONTEND_PORT=3010
-   POSTGRES_BIND_HOST=127.0.0.1
-   POSTGRES_PORT=5433
-   ALLOWED_ORIGINS=https://ollive.hardeep.cv
-   NEXT_PUBLIC_API_BASE_URL=https://ollive.hardeep.cv
-   ```
-
-4. **Bring up the stack** (use a project name to keep container names clean if
-   the box runs other compose stacks):
-   ```bash
-   docker compose -p ollive --env-file .env up -d --build
-   ```
-
-5. **DNS at Cloudflare**: add an `A` record `ollive` → `SERVER_IP`. Set
-   **DNS only (grey cloud)** initially so Certbot's HTTP-01 challenge can
-   reach the origin.
-
-6. **nginx site** at `/etc/nginx/sites-available/ollive` (ships in this repo
-   as a template — see [docs/nginx/ollive](docs/nginx/ollive)):
-   ```nginx
-   server {
-       listen 80;
-       server_name ollive.hardeep.cv;
-       location = /health     { proxy_pass http://127.0.0.1:8001; include /etc/nginx/snippets/ollive-proxy.conf; }
-       location = /chat       { proxy_pass http://127.0.0.1:8001; include /etc/nginx/snippets/ollive-proxy.conf; }
-       location = /stats      { proxy_pass http://127.0.0.1:8001; include /etc/nginx/snippets/ollive-proxy.conf; }
-       location = /sessions   { proxy_pass http://127.0.0.1:8001; include /etc/nginx/snippets/ollive-proxy.conf; }
-       location ^~ /sessions/ { proxy_pass http://127.0.0.1:8001; include /etc/nginx/snippets/ollive-proxy.conf; }
-       location /             { proxy_pass http://127.0.0.1:3010; include /etc/nginx/snippets/ollive-proxy.conf; }
-   }
-   ```
-   Symlink it into `sites-enabled/`, `nginx -t && systemctl reload nginx`.
-
-7. **Issue TLS**:
-   ```bash
-   certbot --nginx -d ollive.hardeep.cv --non-interactive --agree-tos \
-     -m you@example.com --redirect
-   ```
-   Certbot rewrites the nginx site to listen on 443 with the new cert and
-   adds an HTTP→HTTPS redirect.
-
-8. **Flip Cloudflare to proxied**: in DNS, edit the record → Proxy status
-   → **Proxied (orange cloud)**. Then **SSL/TLS → Overview → Full (strict)**
-   (origin has a valid LE cert now).
-
-To re-deploy a code change: rsync + `docker compose -p ollive up -d --build`.
-
----
-
-## What I'd improve with more time
-
-- **Streaming responses** end-to-end (Anthropic supports SSE; the wrapper would
-  need to flush tokens as they arrive, the frontend would need an SSE consumer).
-- **Alembic migrations** instead of `create_all` on startup — fine for a demo
-  but unsafe for schema evolution in production.
-- **Idempotent chat writes** — the `messages` table currently has no
-  request_id, so a client retry could double-write a user turn.
-- **A real queue** (Redis Streams, NATS) between the request handler and the
-  ingestion worker, so the worker can scale horizontally and the request path
-  is fully decoupled from log durability.
-- **PII redaction** in `input_text` / `output_text` before write. Today they
-  are stored verbatim; a regex/LLM-based redaction pass would happen at the
-  log boundary.
-- **Per-token cost from the API response** — the Anthropic response includes
-  `usage.cache_*_tokens` which my estimator ignores.
-- **Auth** — currently the API is unauthenticated. Add a session-cookie or
-  bearer token check before exposing this publicly.
+- **Real authentication**: API is unauthenticated. Add a session-cookie or
+  bearer token before exposing publicly with real data.
+- **Alembic migrations**: `create_all` + a small `ALTER ... IF NOT EXISTS`
+  hook works for a demo; production needs Alembic for non-additive changes.
+- **Better PII**: regex is the cheap layer. A proper NER pass would catch
+  names, addresses, and other things regex can't see.
+- **Streaming logs to the dashboard**: today the dashboard polls. A
+  Postgres `LISTEN/NOTIFY` or a second Redis stream could push live metrics.
+- **cert-manager inside k3s**: today TLS is host nginx + Certbot. Moving the
+  cert into the cluster via cert-manager + an Ingress would remove the
+  host-nginx step entirely.
