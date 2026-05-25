@@ -53,6 +53,11 @@ services:
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
 
+      # Gemini
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.0-flash}
+      GEMINI_BASE_URL: ${GEMINI_BASE_URL:-https://generativelanguage.googleapis.com/v1beta/openai/}
+
       # Storage + worker + CORS
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-ollive}:${POSTGRES_PASSWORD:-ollive}@postgres:5432/${POSTGRES_DB:-ollive}
       AGGREGATION_INTERVAL_SECONDS: ${AGGREGATION_INTERVAL_SECONDS:-60}

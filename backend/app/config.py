@@ -9,14 +9,14 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     # ------ Provider selection ------
-    # One of: "anthropic", "deepseek", "openai"
+    # One of: "anthropic", "deepseek", "openai", "gemini"
     llm_provider: str = "anthropic"
 
     # Anthropic
     anthropic_api_key: str = ""
     anthropic_model: str = "claude-sonnet-4-20250514"
 
-    # OpenAI-compatible (used for both "openai" and "deepseek")
+    # OpenAI-compatible (used for "openai", "deepseek", and "gemini")
     openai_api_key: str = ""
     openai_base_url: str | None = None  # e.g. https://api.deepseek.com/v1
     openai_model: str = "gpt-4o-mini"
@@ -26,6 +26,12 @@ class Settings(BaseSettings):
     deepseek_api_key: str = ""
     deepseek_model: str = "deepseek-chat"
     deepseek_base_url: str = "https://api.deepseek.com/v1"
+
+    # Gemini via Google's OpenAI-compatible endpoint.
+    # https://ai.google.dev/gemini-api/docs/openai
+    gemini_api_key: str = ""
+    gemini_model: str = "gemini-2.0-flash"
+    gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai/"
 
     # ------ Storage ------
     database_url: str = "postgresql+asyncpg://ollive:ollive@localhost:5432/ollive"
@@ -73,6 +79,8 @@ class Settings(BaseSettings):
             return self.deepseek_model
         if p == "openai":
             return self.openai_model
+        if p == "gemini":
+            return self.gemini_model
         raise ValueError(f"unknown LLM_PROVIDER: {self.llm_provider}")
 
     def resolved_api_key(self) -> str:
@@ -83,12 +91,16 @@ class Settings(BaseSettings):
             return self.deepseek_api_key or self.openai_api_key
         if p == "openai":
             return self.openai_api_key
+        if p == "gemini":
+            return self.gemini_api_key or self.openai_api_key
         raise ValueError(f"unknown LLM_PROVIDER: {self.llm_provider}")
 
     def resolved_base_url(self) -> str | None:
         p = self.llm_provider.lower()
         if p == "deepseek":
             return self.openai_base_url or self.deepseek_base_url
+        if p == "gemini":
+            return self.openai_base_url or self.gemini_base_url
         if p == "openai":
             return self.openai_base_url
         return None
@@ -100,6 +112,7 @@ DEFAULT_PRICING: dict[str, tuple[float, float]] = {
     "anthropic": (3.00, 15.00),     # Claude Sonnet 4
     "deepseek": (0.27, 1.10),       # deepseek-chat (cache-miss)
     "openai": (0.15, 0.60),         # gpt-4o-mini
+    "gemini": (0.10, 0.40),         # gemini-2.0-flash
 }
 
 

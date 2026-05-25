@@ -63,3 +63,17 @@ class StatsResponse(BaseModel):
 class HealthResponse(BaseModel):
     status: str
     db: str
+
+
+class BucketPoint(BaseModel):
+    bucket_ts: datetime
+    message_count: int
+    total_tokens: int
+    avg_latency_ms: float
+    p95_latency_ms: float
+    error_count: int
+    total_cost: float
+
+
+class TimeseriesResponse(BaseModel):
+    points: list[BucketPoint]

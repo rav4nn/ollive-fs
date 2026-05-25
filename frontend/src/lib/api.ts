@@ -145,3 +145,23 @@ export async function getStats(): Promise<StatsResponse> {
   if (!res.ok) throw new Error(`stats failed: ${res.status}`);
   return res.json();
 }
+
+export type BucketPoint = {
+  bucket_ts: string;
+  message_count: number;
+  total_tokens: number;
+  avg_latency_ms: number;
+  p95_latency_ms: number;
+  error_count: number;
+  total_cost: number;
+};
+
+export type TimeseriesResponse = { points: BucketPoint[] };
+
+export async function getTimeseries(minutes = 60): Promise<TimeseriesResponse> {
+  const res = await fetch(`${BASE}/stats/timeseries?minutes=${minutes}`, {
+    cache: "no-store",
+  });
+  if (!res.ok) throw new Error(`timeseries failed: ${res.status}`);
+  return res.json();
+}

@@ -6,6 +6,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.schemas import (
+    BucketPoint,
     ChatRequest,
     ChatResponse,
     HealthResponse,
@@ -14,8 +15,9 @@ from app.api.schemas import (
     SessionStats,
     SessionSummary,
     StatsResponse,
+    TimeseriesResponse,
 )
-from app.db.models import InferenceStats, Session
+from app.db.models import InferenceBucket, InferenceStats, Session
 from app.db.session import SessionLocal, get_db
 from app.services.chat_service import (
     get_session_messages,
@@ -117,6 +119,25 @@ async def session_messages(
         raise HTTPException(status_code=404, detail="session not found")
     rows = await get_session_messages(db, session_id)
     return [MessageOut.model_validate(r) for r in rows]
+
+
+@router.get("/stats/timeseries", response_model=TimeseriesResponse)
+async def stats_timeseries(
+    minutes: int = 60, db: AsyncSession = Depends(get_db)
+) -> TimeseriesResponse:
+    """Return per-minute buckets for the last `minutes` minutes (default 60)."""
+    from datetime import datetime, timedelta, timezone
+
+    minutes = max(1, min(minutes, 24 * 60))
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=minutes)
+    rows = (
+        await db.execute(
+            select(InferenceBucket)
+            .where(InferenceBucket.bucket_ts >= cutoff)
+            .order_by(InferenceBucket.bucket_ts.asc())
+        )
+    ).scalars().all()
+    return TimeseriesResponse(points=[BucketPoint.model_validate(r, from_attributes=True) for r in rows])
 
 
 @router.get("/stats", response_model=StatsResponse)

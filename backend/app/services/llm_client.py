@@ -254,7 +254,7 @@ def get_llm_client() -> _BaseClient:
         provider = get_settings().llm_provider.lower()
         if provider == "anthropic":
             _singleton = _AnthropicClient()
-        elif provider in ("openai", "deepseek"):
+        elif provider in ("openai", "deepseek", "gemini"):
             _singleton = _OpenAICompatibleClient()
         else:
             raise ValueError(f"unknown LLM_PROVIDER: {provider}")

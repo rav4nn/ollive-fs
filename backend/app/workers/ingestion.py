@@ -23,7 +23,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.db.models import InferenceLog, InferenceStats
+from app.db.models import InferenceBucket, InferenceLog, InferenceStats
 from app.db.session import SessionLocal
 
 logger = logging.getLogger(__name__)
@@ -114,6 +114,58 @@ async def aggregate_once(db: AsyncSession) -> int:
         )
         await db.execute(stmt)
 
+    # ---- per-minute time-series buckets (for throughput / latency charts) ----
+    bucket_ts = func.date_trunc("minute", InferenceLog.timestamp)
+    bucket_stmt = (
+        select(
+            bucket_ts.label("bucket_ts"),
+            func.count(InferenceLog.id).label("msg_count"),
+            func.coalesce(func.sum(InferenceLog.total_tokens), 0).label("token_sum"),
+            func.coalesce(func.avg(InferenceLog.latency_ms), 0.0).label("avg_latency"),
+            func.coalesce(
+                func.percentile_cont(0.95).within_group(InferenceLog.latency_ms.asc()), 0.0
+            ).label("p95_latency"),
+            func.coalesce(func.sum(InferenceLog.cost_estimate), 0.0).label("cost_sum"),
+            error_expr,
+        )
+        .where(InferenceLog.id.in_(pending_ids))
+        .group_by(bucket_ts)
+    )
+    bucketed = (await db.execute(bucket_stmt)).all()
+    for b in bucketed:
+        stmt = pg_insert(InferenceBucket).values(
+            bucket_ts=b.bucket_ts,
+            message_count=b.msg_count,
+            total_tokens=b.token_sum,
+            avg_latency_ms=float(b.avg_latency),
+            p95_latency_ms=float(b.p95_latency),
+            error_count=b.error_count,
+            total_cost=float(b.cost_sum),
+        )
+        # On conflict (same minute aggregated more than once across ticks)
+        # accumulate counts; recompute avg latency using sum/count; take the
+        # higher p95 since a true p95 across multiple ticks would need raw
+        # samples (close enough for a dashboard).
+        new_count_expr = InferenceBucket.message_count + b.msg_count
+        new_latency_total = (
+            InferenceBucket.avg_latency_ms * InferenceBucket.message_count
+            + float(b.avg_latency) * b.msg_count
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[InferenceBucket.bucket_ts],
+            set_={
+                "message_count": new_count_expr,
+                "total_tokens": InferenceBucket.total_tokens + b.token_sum,
+                "avg_latency_ms": new_latency_total / new_count_expr,
+                "p95_latency_ms": func.greatest(
+                    InferenceBucket.p95_latency_ms, float(b.p95_latency)
+                ),
+                "error_count": InferenceBucket.error_count + b.error_count,
+                "total_cost": InferenceBucket.total_cost + float(b.cost_sum),
+            },
+        )
+        await db.execute(stmt)
+
     # Mark the consumed log rows so we don't double-count them.
     await db.execute(
         update(InferenceLog)
@@ -123,7 +175,8 @@ async def aggregate_once(db: AsyncSession) -> int:
 
     await db.commit()
     logger.info(
-        "aggregation tick: consumed=%d sessions=%d", len(pending_ids), len(session_ids)
+        "aggregation tick: consumed=%d sessions=%d buckets=%d",
+        len(pending_ids), len(session_ids), len(bucketed),
     )
     return len(pending_ids)
 

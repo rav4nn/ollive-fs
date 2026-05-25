@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { getStats, StatsResponse } from "@/lib/api";
+import { getStats, getTimeseries, StatsResponse, TimeseriesResponse } from "@/lib/api";
+import Sparkline from "./Sparkline";
 
 const REFRESH_MS = 30_000;
 
@@ -27,15 +28,17 @@ function fmtTime(iso: string): string {
 
 export default function Dashboard() {
   const [stats, setStats] = useState<StatsResponse | null>(null);
+  const [series, setSeries] = useState<TimeseriesResponse | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     const tick = async () => {
       try {
-        const s = await getStats();
+        const [s, t] = await Promise.all([getStats(), getTimeseries(60)]);
         if (!cancelled) {
           setStats(s);
+          setSeries(t);
           setErr(null);
         }
       } catch (e: any) {
@@ -98,6 +101,54 @@ export default function Dashboard() {
           </div>
         </div>
       </div>
+
+      {series && series.points.length > 0 && (
+        <div
+          className="dash-grid"
+          style={{ gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))" }}
+        >
+          <div className="card">
+            <Sparkline
+              label="Messages / min"
+              values={series.points.map((p) => p.message_count)}
+              color="var(--accent)"
+              formatLatest={(v) => fmtNum(v)}
+            />
+          </div>
+          <div className="card">
+            <Sparkline
+              label="Tokens / min"
+              values={series.points.map((p) => p.total_tokens)}
+              color="#9b87f5"
+              formatLatest={(v) => fmtNum(v)}
+            />
+          </div>
+          <div className="card">
+            <Sparkline
+              label="Avg latency (ms)"
+              values={series.points.map((p) => p.avg_latency_ms)}
+              color="#5ed1a8"
+              formatLatest={(v) => `${Math.round(v)} ms`}
+            />
+          </div>
+          <div className="card">
+            <Sparkline
+              label="p95 latency (ms)"
+              values={series.points.map((p) => p.p95_latency_ms)}
+              color="#f5b25e"
+              formatLatest={(v) => `${Math.round(v)} ms`}
+            />
+          </div>
+          <div className="card">
+            <Sparkline
+              label="Errors / min"
+              values={series.points.map((p) => p.error_count)}
+              color="var(--danger)"
+              formatLatest={(v) => fmtNum(v)}
+            />
+          </div>
+        </div>
+      )}
 
       <h2 style={{ fontSize: 14, color: "var(--muted)", marginBottom: 8 }}>
         Per-session breakdown

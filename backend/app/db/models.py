@@ -96,6 +96,27 @@ class InferenceLog(Base):
     )
 
 
+class InferenceBucket(Base):
+    """Per-minute aggregated metrics for throughput / latency / error charts.
+
+    Updated by the same aggregation worker that maintains InferenceStats.
+    `bucket_ts` is the start-of-minute UTC timestamp (truncated). One row
+    per minute regardless of session.
+    """
+
+    __tablename__ = "inference_buckets"
+
+    bucket_ts: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), primary_key=True
+    )
+    message_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    total_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    avg_latency_ms: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    p95_latency_ms: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    error_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    total_cost: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+
+
 class InferenceStats(Base):
     """Per-session aggregated stats. Updated by the ingestion worker."""
 

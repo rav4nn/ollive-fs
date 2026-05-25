@@ -21,6 +21,8 @@ logger = logging.getLogger(__name__)
 _ADDITIVE_MIGRATIONS: list[str] = [
     # Added in the streaming PR. Safe to re-run.
     "ALTER TABLE inference_logs ADD COLUMN IF NOT EXISTS time_to_first_token_ms INTEGER",
+    # inference_buckets table is created by Base.metadata.create_all so no
+    # ALTER needed — leaving this list as the upgrade hook for the next one.
 ]
 
 
