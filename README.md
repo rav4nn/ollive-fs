@@ -112,7 +112,7 @@ All via env (see `.env.example`):
 | Variable | Default | Notes |
 | --- | --- | --- |
 | `LLM_PROVIDER` | `anthropic` | `anthropic` \| `deepseek` \| `openai` \| `gemini` |
-| `ANTHROPIC_API_KEY` / `ANTHROPIC_MODEL` | / `claude-sonnet-4-20250514` | |
+| `ANTHROPIC_API_KEY` / `ANTHROPIC_MODEL` | / `claude-sonnet-5` | |
 | `DEEPSEEK_API_KEY` / `DEEPSEEK_MODEL` | / `deepseek-chat` | |
 | `OPENAI_API_KEY` / `OPENAI_MODEL` / `OPENAI_BASE_URL` | / `gpt-4o-mini` / — | |
 | `GEMINI_API_KEY` / `GEMINI_MODEL` | / `gemini-2.5-pro` | Uses Google's OpenAI-compatible endpoint |
