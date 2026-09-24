@@ -41,7 +41,7 @@ services:
 
       # Anthropic
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-4-20250514}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-5}
 
       # DeepSeek
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}

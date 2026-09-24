@@ -22,6 +22,10 @@ SYSTEM_PROMPT = (
     "You are a concise, helpful assistant. Keep answers focused and friendly."
 )
 
+# Claude Sonnet 5 runs adaptive thinking when `thinking` is omitted, and thinking
+# tokens count toward max_tokens, so leave headroom beyond the visible answer.
+MAX_TOKENS = 16000
+
 
 def new_session_id() -> str:
     return uuid.uuid4().hex
@@ -76,7 +80,7 @@ async def handle_chat(
     messages = [{"role": m.role, "content": m.content} for m in history]
 
     llm = get_llm_client(provider)
-    result = await llm.chat(messages=messages, system=SYSTEM_PROMPT, max_tokens=1024)
+    result = await llm.chat(messages=messages, system=SYSTEM_PROMPT, max_tokens=MAX_TOKENS)
 
     if result.status == "ok" and result.text:
         db.add(Message(session_id=sid, role="assistant", content=result.text))
@@ -138,7 +142,9 @@ async def handle_chat_stream(
 
     llm = get_llm_client(provider)
     final: LLMResult | None = None
-    async for item in llm.chat_stream(messages=messages, system=SYSTEM_PROMPT, max_tokens=1024):
+    async for item in llm.chat_stream(
+        messages=messages, system=SYSTEM_PROMPT, max_tokens=MAX_TOKENS
+    ):
         if isinstance(item, str):
             yield ("delta", item)
         else:

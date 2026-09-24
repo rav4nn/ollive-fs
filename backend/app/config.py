@@ -14,7 +14,7 @@ class Settings(BaseSettings):
 
     # Anthropic
     anthropic_api_key: str = ""
-    anthropic_model: str = "claude-sonnet-4-20250514"
+    anthropic_model: str = "claude-sonnet-5"
 
     # OpenAI-compatible (used for "openai", "deepseek", and "gemini")
     openai_api_key: str = ""
@@ -110,7 +110,7 @@ class Settings(BaseSettings):
 # Pricing defaults per provider (USD per 1M tokens). Used when env doesn't override.
 DEFAULT_PRICING: dict[str, tuple[float, float]] = {
     # provider -> (input, output)
-    "anthropic": (3.00, 15.00),     # Claude Sonnet 4
+    "anthropic": (2.00, 10.00),     # Claude Sonnet 5
     "deepseek": (0.27, 1.10),       # deepseek-chat (cache-miss)
     "openai": (0.15, 0.60),         # gpt-4o-mini
     "gemini": (1.25, 10.00),        # gemini-2.5-pro (≤200K context tier)
